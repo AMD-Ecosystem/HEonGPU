@@ -6,6 +6,28 @@
 set(HEONGPU_INCLUDE_PARENT ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(HEONGPU_INCLUDE_ROOT ${HEONGPU_INCLUDE_PARENT}/heongpu)
 
+# Helper function to set HIP properties on targets with .cu sources
+function(heongpu_set_gpu_properties target_name sources)
+    if(USE_HIP)
+        set_source_files_properties(${sources} PROPERTIES LANGUAGE HIP)
+        set_target_properties(${target_name} PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
+        )
+        target_compile_definitions(${target_name} PRIVATE USE_HIP)
+        # Add hip_compat shim headers before system includes
+        target_include_directories(${target_name} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
+    else()
+        set_target_properties(${target_name} PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+            CUDA_RUNTIME_LIBRARY Static
+            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+        )
+    endif()
+endfunction()
+
 # GMP
 # We use <gmp.h> in public headers and link against libgmp. Some environments
 # don't provide a CMake package that defines GMP::GMP, so create an imported
@@ -68,13 +90,7 @@ target_link_libraries(heongpu_util
         gmp
         ntl
 )
-set_target_properties(heongpu_util PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+heongpu_set_gpu_properties(heongpu_util "${HEONGPU_UTIL_SOURCES}")
 
 set(HEONGPU_KERNEL_SOURCES
     lib/kernel/addition.cu
@@ -101,13 +117,7 @@ target_include_directories(heongpu_kernel
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/util>
 )
 target_link_libraries(heongpu_kernel PUBLIC heongpu_util)
-set_target_properties(heongpu_kernel PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+heongpu_set_gpu_properties(heongpu_kernel "${HEONGPU_KERNEL_SOURCES}")
 
 set(HEONGPU_HOST_CORE_SOURCES
     lib/heongpu.cpp
@@ -126,13 +136,7 @@ target_include_directories(heongpu_host_core
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/kernel>
 )
 target_link_libraries(heongpu_host_core PUBLIC heongpu_kernel heongpu_util)
-set_target_properties(heongpu_host_core PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+heongpu_set_gpu_properties(heongpu_host_core "${HEONGPU_HOST_CORE_SOURCES}")
 
 set(HEONGPU_HOST_BFV_SOURCES
     lib/host/bfv/ciphertext.cu
@@ -162,13 +166,7 @@ target_include_directories(heongpu_host_bfv
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/kernel>
 )
 target_link_libraries(heongpu_host_bfv PUBLIC heongpu_host_core heongpu_kernel heongpu_util)
-set_target_properties(heongpu_host_bfv PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+heongpu_set_gpu_properties(heongpu_host_bfv "${HEONGPU_HOST_BFV_SOURCES}")
 
 set(HEONGPU_HOST_CKKS_SOURCES
     lib/host/ckks/chebyshev_interpolation.cu
@@ -201,13 +199,7 @@ target_include_directories(heongpu_host_ckks
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/kernel>
 )
 target_link_libraries(heongpu_host_ckks PUBLIC heongpu_host_core heongpu_kernel heongpu_util)
-set_target_properties(heongpu_host_ckks PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+heongpu_set_gpu_properties(heongpu_host_ckks "${HEONGPU_HOST_CKKS_SOURCES}")
 
 set(HEONGPU_HOST_TFHE_SOURCES
     lib/host/tfhe/ciphertext.cu
@@ -233,13 +225,7 @@ target_include_directories(heongpu_host_tfhe
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/kernel>
 )
 target_link_libraries(heongpu_host_tfhe PUBLIC heongpu_host_core heongpu_kernel heongpu_util)
-set_target_properties(heongpu_host_tfhe PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+heongpu_set_gpu_properties(heongpu_host_tfhe "${HEONGPU_HOST_TFHE_SOURCES}")
 
 add_library(heongpu STATIC
     $<TARGET_OBJECTS:heongpu_util>
@@ -251,15 +237,25 @@ add_library(heongpu STATIC
 )
 target_compile_features(heongpu PUBLIC cxx_std_17)
 
-set_target_properties(heongpu PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    OUTPUT_NAME "heongpu"
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS OFF
-    CUDA_RUNTIME_LIBRARY Static
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-)
+if(USE_HIP)
+    set_target_properties(heongpu PROPERTIES
+        VERSION ${PROJECT_VERSION}
+        OUTPUT_NAME "heongpu"
+        POSITION_INDEPENDENT_CODE ON
+        HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_definitions(heongpu PRIVATE USE_HIP)
+else()
+    set_target_properties(heongpu PROPERTIES
+        VERSION ${PROJECT_VERSION}
+        OUTPUT_NAME "heongpu"
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+        CUDA_RUNTIME_LIBRARY Static
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+    )
+endif()
 
 target_include_directories(heongpu
     PUBLIC
@@ -272,24 +268,47 @@ target_include_directories(heongpu
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/util>
 )
 
-target_link_libraries(heongpu PUBLIC
-    ntt
-    fft
-    rngongpu
-    gmp
-    ntl
-    rmm
-    CUDA::curand
-    ZLIB::ZLIB
-)
-target_compile_options(heongpu PRIVATE
-    $<$<CONFIG:Release>:-O3 -DNDEBUG>
-    $<$<CONFIG:RelWithDebInfo>:-O3 -g -DNDEBUG>
-    $<$<CONFIG:MinSizeRel>:-Os -DNDEBUG>
-    $<$<CONFIG:Debug>:-g>
-    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
-    $<$<AND:$<CONFIG:RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
-)
+if(USE_HIP)
+    target_link_libraries(heongpu PUBLIC
+        ntt
+        fft
+        rngongpu
+        gmp
+        ntl
+        rmm
+        hip::hiprand
+        ZLIB::ZLIB
+    )
+else()
+    target_link_libraries(heongpu PUBLIC
+        ntt
+        fft
+        rngongpu
+        gmp
+        ntl
+        rmm
+        CUDA::curand
+        ZLIB::ZLIB
+    )
+endif()
+
+if(USE_HIP)
+    target_compile_options(heongpu PRIVATE
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O3 -g -DNDEBUG>
+        $<$<CONFIG:MinSizeRel>:-Os -DNDEBUG>
+        $<$<CONFIG:Debug>:-g>
+    )
+else()
+    target_compile_options(heongpu PRIVATE
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O3 -g -DNDEBUG>
+        $<$<CONFIG:MinSizeRel>:-Os -DNDEBUG>
+        $<$<CONFIG:Debug>:-g>
+        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
+        $<$<AND:$<CONFIG:RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
+    )
+endif()
 
 install(TARGETS heongpu
   EXPORT ${HEonGPU_TARGETS_EXPORT_NAME}

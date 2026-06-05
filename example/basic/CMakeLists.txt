@@ -25,14 +25,22 @@ set(EXECUTABLES
 
 function(add_example exe source)
     add_executable(${exe} ${source})
-    target_link_libraries(${exe} PRIVATE heongpu CUDA::cudart OpenMP::OpenMP_CXX)
-    target_compile_options(${exe} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
-    set_target_properties(${exe} PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        POSITION_INDEPENDENT_CODE ON
-        CUDA_RUNTIME_LIBRARY Static
-        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-    )
+    if(USE_HIP)
+        target_link_libraries(${exe} PRIVATE heongpu hip::host OpenMP::OpenMP_CXX)
+        set_target_properties(${exe} PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            LINKER_LANGUAGE CXX
+        )
+    else()
+        target_link_libraries(${exe} PRIVATE heongpu CUDA::cudart OpenMP::OpenMP_CXX)
+        target_compile_options(${exe} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
+        set_target_properties(${exe} PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            POSITION_INDEPENDENT_CODE ON
+            CUDA_RUNTIME_LIBRARY Static
+            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+        )
+    endif()
 endfunction()
 
 list(LENGTH EXECUTABLES EXECUTABLES_LENGTH)

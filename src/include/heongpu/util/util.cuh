@@ -6,6 +6,7 @@
 #ifndef HEONGPU_UTIL_H
 #define HEONGPU_UTIL_H
 
+#include <heongpu/cuda_to_hip.h>
 #include "gpuntt/common/common.cuh"
 #include "gpuntt/common/nttparameters.cuh"
 #include <string>
@@ -306,9 +307,14 @@ namespace heongpu
 
     static __device__ __forceinline__ uint32_t warp_reduce(uint32_t input)
     {
+        // Use warpSize for the reduction loop; it is correct at runtime on both
+        // CUDA (32) and HIP (64 on CDNA, 32 on RDNA).
         for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         {
-#if defined(__CUDA_ARCH__)
+#if defined(__HIP_DEVICE_COMPILE__)
+            // HIP requires a 64-bit mask for __shfl_down_sync
+            input += __shfl_down(input, offset);
+#elif defined(__CUDA_ARCH__)
             input += __shfl_down_sync(0xFFFFFFFF, input, offset);
 #endif
         }

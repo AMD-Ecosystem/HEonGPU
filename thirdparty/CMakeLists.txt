@@ -19,16 +19,33 @@ message(STATUS "Thirdparty build completed successfully")
 
 include(FetchContent)
 
-FetchContent_Declare(
-    rmm
-    GIT_REPOSITORY https://github.com/rapidsai/rmm
-    GIT_TAG        branch-25.08
-    SOURCE_SUBDIR  cpp
-)
+# RMM (RAPIDS Memory Manager)
+# RMM depends on CUDA. For HIP builds, we use a simple stub implementation.
+if(NOT USE_HIP)
+    FetchContent_Declare(
+        rmm
+        GIT_REPOSITORY https://github.com/rapidsai/rmm
+        GIT_TAG        branch-25.08
+        SOURCE_SUBDIR  cpp
+    )
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(rmm)
+else()
+    # For HIP builds, create a stub rmm target that provides minimal compatibility
+    add_library(rmm INTERFACE)
+    target_include_directories(rmm INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/rmm_hip_stub/include>
+        $<INSTALL_INTERFACE:include/rmm_hip_stub>)
+    # Use hip::host (not hip::device) to avoid propagating HIP compile flags
+    # to pure C++ consumers like test executables compiled with g++.
+    target_link_libraries(rmm INTERFACE hip::host)
+    # Install the interface library so exports work
+    install(TARGETS rmm EXPORT rmm_targets)
+    install(EXPORT rmm_targets DESTINATION lib/cmake/rmm)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/rmm_hip_stub/include/ DESTINATION include/rmm_hip_stub)
+endif()
 
-set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(rmm)
-
+# Pass USE_HIP to subdirectories
 add_subdirectory(GPU-FFT)
 add_subdirectory(GPU-NTT)
 add_subdirectory(RNGonGPU)
