@@ -3,8 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Developer: Alişah Özcan
 
+if(USE_HIP)
+    set(THIRDPARTY_BUILD_ARG ON)
+else()
+    set(THIRDPARTY_BUILD_ARG OFF)
+endif()
+
 execute_process(
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/build.sh
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/build.sh ${THIRDPARTY_BUILD_ARG}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     RESULT_VARIABLE BUILD_SCRIPT_RESULT
     OUTPUT_VARIABLE BUILD_SCRIPT_OUTPUT
@@ -43,6 +49,13 @@ else()
     install(TARGETS rmm EXPORT rmm_targets)
     install(EXPORT rmm_targets DESTINATION lib/cmake/rmm)
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/rmm_hip_stub/include/ DESTINATION include/rmm_hip_stub)
+endif()
+
+# The submodules include <cuda_runtime.h> and <curand_kernel.h> by name. Putting
+# hip_compat/ ahead of them on the include path resolves those to HIP shims and
+# leaves the submodule sources' include lines untouched.
+if(USE_HIP)
+    include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/hip_compat)
 endif()
 
 # Pass USE_HIP to subdirectories

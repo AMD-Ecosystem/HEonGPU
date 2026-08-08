@@ -43,6 +43,13 @@
 #define cudaGetDeviceProperties     hipGetDeviceProperties
 #define cudaDeviceProp              hipDeviceProp_t
 
+// hipPointerAttribute_t exposes .type and has no .memoryType member, which is
+// the shape CUDA 10.0+ has. Claiming that version steers version-guarded code
+// to the .type branch.
+#ifndef CUDART_VERSION
+#define CUDART_VERSION 10000
+#endif
+
 // Pointer attributes
 #define cudaPointerAttributes       hipPointerAttribute_t
 #define cudaPointerGetAttributes    hipPointerGetAttributes
