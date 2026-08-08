@@ -133,7 +133,8 @@ HEonGPU now includes support for **Multiparty Computation (MPC)** protocols, pro
 - [CMake](https://cmake.org/download/) >=3.30.4
 - [GCC](https://gcc.gnu.org/)
 - [GMP](https://gmplib.org/)
-- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=11.4
+- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=11.4 (NVIDIA GPUs)
+- [ROCm](https://rocm.docs.amd.com/) >=6.0 (AMD GPUs)
 - [OpenSSL](https://www.openssl.org/) >= 1.1.0
 - [ZLIB](https://zlib.net/)
 
@@ -168,6 +169,29 @@ $ cmake --build ./build/
 $ sudo cmake --install build
 ```
 Available build types: `Debug`, `Release` (default), `RelWithDebInfo`, `MinSizeRel`. Override with `-D CMAKE_BUILD_TYPE=<type>`. These propagate to all bundled libraries (GPU-FFT, GPU-NTT, RNGonGPU).
+
+#### AMD GPUs (ROCm)
+
+Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by a bundled minimal implementation, since RMM itself requires CUDA.
+
+<div align="center">
+
+| GPU Architecture | Target (CMAKE_HIP_ARCHITECTURES Value) |
+|:----------------:|:---------------------------------------:|
+| CDNA2  | gfx90a |
+| CDNA3  | gfx942 |
+| RDNA3  | gfx1100, gfx1101, gfx1102 |
+| RDNA4  | gfx1200, gfx1201 |
+
+</div>
+
+```bash
+$ cmake -S . -B build -D USE_HIP=ON -D CMAKE_HIP_ARCHITECTURES=gfx90a -D CMAKE_BUILD_TYPE=Release
+$ cmake --build ./build/
+$ sudo cmake --install build
+```
+
+Default HIP architecture: `gfx90a`. Override with `-D CMAKE_HIP_ARCHITECTURES=<...>` to match your card.
 
 ### Uninstall
 
