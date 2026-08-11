@@ -98,20 +98,24 @@ index e9c2848..63a0584 100644
  install(TARGETS ntt
    EXPORT ${GPUNTT_TARGETS_EXPORT_NAME}
 diff --git a/src/include/gpuntt/common/modular_arith.cuh b/src/include/gpuntt/common/modular_arith.cuh
-index 333ddfb..d41ade0 100644
+index 333ddfb..6fc856e 100644
 --- a/src/include/gpuntt/common/modular_arith.cuh
 +++ b/src/include/gpuntt/common/modular_arith.cuh
-@@ -209,14 +209,33 @@ namespace modular_operation_gpu
+@@ -209,14 +209,37 @@ namespace modular_operation_gpu
                  value.y = 0;
              }
  
 +            // A shift count of 0 or of 64 and above makes the 64-bit shifts
-+            // below undefined, and the back ends disagree on what they do:
-+            // PTX yields 0, while AMDGPU keeps only the low 6 bits of the
-+            // count, so a shift of 64 acts as a shift of 0. The Barrett
-+            // reduction below shifts by modulus.bit + 3, which reaches 64 for
-+            // any modulus of 61 bits or more, so both cases have to be
-+            // handled explicitly for the reduction to be correct.
++            // below undefined, and the back ends disagree on what they do.
++            // AMDGPU keeps only the low 6 bits of the count, so a shift of 64
++            // acts as a shift of 0 and one limb is OR-ed into the other instead
++            // of replacing it. PTX clamps the count to the register width and
++            // yields 0, which happens to produce the right 128-bit result at a
++            // count of exactly 64 but discards the whole value above it. The
++            // Barrett reduction below shifts by modulus.bit + 3, so a 61-bit
++            // modulus reaches 64 and a 62-bit one, the widest supported for
++            // Data64, reaches 65. Handling the cases explicitly is a
++            // correctness fix on both back ends, not only on AMD.
              __device__ __forceinline__ uint128_t
              operator<<(const std::uint32_t& shift)
              {
@@ -138,7 +142,7 @@ index 333ddfb..d41ade0 100644
  
                  return result;
              }
-@@ -226,9 +245,21 @@ namespace modular_operation_gpu
+@@ -226,9 +249,21 @@ namespace modular_operation_gpu
              {
                  uint128_t result;
  
@@ -163,7 +167,7 @@ index 333ddfb..d41ade0 100644
  
                  return result;
              }
-@@ -237,6 +268,13 @@ namespace modular_operation_gpu
+@@ -237,6 +272,13 @@ namespace modular_operation_gpu
              {
                  uint128_t result;
  
@@ -177,7 +181,7 @@ index 333ddfb..d41ade0 100644
                  asm("{\n\t"
                      "sub.cc.u64      %1, %3, %5;    \n\t"
                      "subc.u64        %0, %2, %4;    \n\t"
-@@ -244,6 +282,7 @@ namespace modular_operation_gpu
+@@ -244,6 +286,7 @@ namespace modular_operation_gpu
                      : "=l"(result.value.y), "=l"(result.value.x)
                      : "l"(value.y), "l"(value.x), "l"(other.value.y),
                        "l"(other.value.x));
@@ -185,7 +189,7 @@ index 333ddfb..d41ade0 100644
  
                  return result;
              }
-@@ -252,6 +291,11 @@ namespace modular_operation_gpu
+@@ -252,6 +295,11 @@ namespace modular_operation_gpu
              operator-=(const uint128_t& other)
              {
                  uint128_t result;
@@ -197,7 +201,7 @@ index 333ddfb..d41ade0 100644
                  asm("{\n\t"
                      "sub.cc.u64      %1, %3, %5;    \n\t"
                      "subc.u64        %0, %2, %4;    \n\t"
-@@ -259,6 +303,7 @@ namespace modular_operation_gpu
+@@ -259,6 +307,7 @@ namespace modular_operation_gpu
                      : "=l"(result.value.y), "=l"(result.value.x)
                      : "l"(value.y), "l"(value.x), "l"(other.value.y),
                        "l"(other.value.x));
@@ -205,7 +209,7 @@ index 333ddfb..d41ade0 100644
  
                  return result;
              }
-@@ -298,12 +343,17 @@ namespace modular_operation_gpu
+@@ -298,12 +347,17 @@ namespace modular_operation_gpu
                                                              const Data64& b)
          {
              uint128_t result;
