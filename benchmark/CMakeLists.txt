@@ -13,13 +13,26 @@ set(EXECUTABLES
 
 function(add_benchmark exe source)
     add_executable(${exe} ${source})
-    target_link_libraries(${exe} PRIVATE heongpu CUDA::cudart)
-    set_target_properties(${exe} PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        POSITION_INDEPENDENT_CODE ON
-        CUDA_RUNTIME_LIBRARY Static
-        CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES}
-    )
+    if(USE_HIP)
+        # Benchmark sources include HEonGPU headers which transitively include
+        # rocThrust; those require compilation as HIP source.
+        set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
+        target_link_libraries(${exe} PRIVATE heongpu hip::host)
+        target_include_directories(${exe} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
+        target_compile_definitions(${exe} PRIVATE USE_HIP)
+        set_target_properties(${exe} PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
+        )
+    else()
+        target_link_libraries(${exe} PRIVATE heongpu CUDA::cudart)
+        set_target_properties(${exe} PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            POSITION_INDEPENDENT_CODE ON
+            CUDA_RUNTIME_LIBRARY Static
+            CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES}
+        )
+    endif()
 endfunction()
 
 list(LENGTH EXECUTABLES EXECUTABLES_LENGTH)

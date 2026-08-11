@@ -16,10 +16,19 @@ set(EXECUTABLES
 function(add_example exe source)
     add_executable(${exe} ${source})
     if(USE_HIP)
+        # Example sources include HEonGPU headers which transitively include
+        # rocThrust; those require compilation as HIP source.
+        set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
         target_link_libraries(${exe} PRIVATE heongpu hip::host OpenMP::OpenMP_CXX)
+        target_include_directories(${exe} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
+        target_compile_definitions(${exe} PRIVATE USE_HIP)
+        # OpenMP::OpenMP_CXX only decorates the CXX language, so a HIP-compiled
+        # source needs the flag on both the compile and the link line.
+        target_compile_options(${exe} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${OpenMP_CXX_FLAGS}>)
+        target_link_options(${exe} PRIVATE $<$<LINK_LANGUAGE:HIP>:${OpenMP_CXX_FLAGS}>)
         set_target_properties(${exe} PROPERTIES
             POSITION_INDEPENDENT_CODE ON
-            LINKER_LANGUAGE CXX
+            HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
         )
     else()
         target_link_libraries(${exe} PRIVATE heongpu CUDA::cudart OpenMP::OpenMP_CXX)
