@@ -51,6 +51,28 @@ To integrate HEonGPU into your own CMake project, first ensure the library is in
     # Enable separable compilation for CUDA, which is often required
     set_target_properties(<your-target> PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP language and the HIP runtime instead. Sources that include the HEonGPU headers must be compiled as HIP, because the headers pull in rocThrust.
+
+.. code-block:: cmake
+
+    # Set the project language to include HIP
+    project(<your-project> LANGUAGES CXX HIP)
+
+    # Find HIP, which is a dependency
+    find_package(hip REQUIRED)
+
+    # ... your other project configurations ...
+
+    # Find the HEonGPU package
+    find_package(HEonGPU REQUIRED)
+
+    # ... define your executable target ...
+    add_executable(<your-target> main.cpp)
+    set_source_files_properties(main.cpp PROPERTIES LANGUAGE HIP)
+
+    # Link your application against the HEonGPU library and the HIP runtime
+    target_link_libraries(<your-target> PRIVATE HEonGPU::heongpu hip::host)
+
 Project Roadmap
 ---------------
 

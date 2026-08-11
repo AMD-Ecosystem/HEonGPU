@@ -34,6 +34,23 @@ index efb7ca3..e1d43d4 100644
      set(CMAKE_CUDA_ARCHITECTURES 80;86;89;90 CACHE STRING "CUDA GPU architectures" FORCE)
  endif()
  message(STATUS "Setting CMAKE_CUDA_ARCHITECTURES to ${CMAKE_CUDA_ARCHITECTURES} for RNGonGPU")
+diff --git a/cmake/Config.cmake.in b/cmake/Config.cmake.in
+index 5d7bb0f..0c45faf 100644
+--- a/cmake/Config.cmake.in
++++ b/cmake/Config.cmake.in
+@@ -1,6 +1,11 @@
+ include(CMakeFindDependencyMacro)
+ 
+-find_dependency(CUDAToolkit REQUIRED)
++if("@USE_HIP@")
++    find_dependency(hip REQUIRED)
++    find_dependency(hiprand REQUIRED)
++else()
++    find_dependency(CUDAToolkit REQUIRED)
++endif()
+ find_dependency(OpenSSL REQUIRED)
+ find_dependency(GPUNTT REQUIRED)
+ 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index ad6e5b3..54fd2f5 100644
 --- a/src/CMakeLists.txt

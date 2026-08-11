@@ -36,6 +36,21 @@ index 485ae3d..a60014c 100755
  message(STATUS "Setting CMAKE_CUDA_ARCHITECTURES to ${CMAKE_CUDA_ARCHITECTURES} for GPUFFT")
  
  ##################
+diff --git a/cmake/Config.cmake.in b/cmake/Config.cmake.in
+index 6c79142..562a79c 100644
+--- a/cmake/Config.cmake.in
++++ b/cmake/Config.cmake.in
+@@ -1,5 +1,9 @@
+ include(CMakeFindDependencyMacro)
+ 
+-find_dependency(CUDAToolkit REQUIRED)
++if("@USE_HIP@")
++    find_dependency(hip REQUIRED)
++else()
++    find_dependency(CUDAToolkit REQUIRED)
++endif()
+ 
+ include("${CMAKE_CURRENT_LIST_DIR}/@GPUFFT_TARGETS_EXPORT_NAME@.cmake")
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 0a88419..9bfa3c6 100755
 --- a/src/CMakeLists.txt

@@ -261,6 +261,10 @@ target_include_directories(heongpu
     PUBLIC
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_PARENT}>
         $<INSTALL_INTERFACE:${INCLUDES_INSTALL_DIR}>
+        # The installed headers include cuda_runtime.h and curand_kernel.h by
+        # name, so a consumer of the installed library needs the shims that
+        # resolve those on AMD GPUs.
+        $<$<BOOL:${USE_HIP}>:$<INSTALL_INTERFACE:include/hip_compat>>
     PRIVATE
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}>
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/host>

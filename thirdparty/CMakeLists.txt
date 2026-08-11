@@ -49,6 +49,14 @@ else()
     install(TARGETS rmm EXPORT rmm_targets)
     install(EXPORT rmm_targets DESTINATION lib/cmake/rmm)
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/rmm_hip_stub/include/ DESTINATION include/rmm_hip_stub)
+    # The installed HEonGPU config resolves rmm with find_package, which needs a
+    # config file next to the exported targets.
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rmmConfig.cmake
+"include(CMakeFindDependencyMacro)
+find_dependency(hip REQUIRED)
+include(\"\${CMAKE_CURRENT_LIST_DIR}/rmm_targets.cmake\")
+")
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rmmConfig.cmake DESTINATION lib/cmake/rmm)
 endif()
 
 # The submodules include <cuda_runtime.h> and <curand_kernel.h> by name. Putting
@@ -56,6 +64,7 @@ endif()
 # leaves the submodule sources' include lines untouched.
 if(USE_HIP)
     include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/hip_compat)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/hip_compat/ DESTINATION include/hip_compat)
 endif()
 
 # Pass USE_HIP to subdirectories
