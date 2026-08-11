@@ -95,7 +95,7 @@ The library uses a standard CMake build process. The most critical configuration
 Verifying the Installation
 --------------------------
 
-After a successful build, you can verify the library's functionality by running the built-in tests, benchmarks, and examples. To do this, you must enable them during the CMake configuration step.
+After a successful build, you can verify the library's functionality by running the built-in tests, benchmarks, and examples. To do this, you must enable them during the CMake configuration step. On AMD GPUs, use ``-D USE_HIP=ON -D CMAKE_HIP_ARCHITECTURES=<target>`` in place of ``-D CMAKE_CUDA_ARCHITECTURES=<arch>`` in the commands below; tests, examples and benchmarks all build and run there.
 
 * **To build and run tests**:
     .. code-block:: bash
