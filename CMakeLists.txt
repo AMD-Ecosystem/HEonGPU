@@ -51,11 +51,6 @@ if(USE_HIP)
 
     # rocThrust is a drop-in for Thrust on HIP
     find_package(rocthrust REQUIRED)
-
-    # Set HIP runtime library path for pure C++ targets that link against HIP libraries
-    # (to avoid CMake's HIP language compile flag propagation to g++)
-    set(HIP_RUNTIME_LIB "${hip_LIB_INSTALL_DIR}/libamdhip64.so" CACHE STRING "HIP runtime library")
-    set(HIP_INCLUDE_DIRS "${hip_INCLUDE_DIRS}" CACHE STRING "HIP include directories")
 else()
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)

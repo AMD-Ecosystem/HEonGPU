@@ -312,7 +312,8 @@ namespace heongpu
         for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         {
 #if defined(__HIP_DEVICE_COMPILE__)
-            // HIP requires a 64-bit mask for __shfl_down_sync
+            // HIP's __shfl_down operates over the whole wavefront, so no lane
+            // mask constant is needed and none is width-dependent.
             input += __shfl_down(input, offset);
 #elif defined(__CUDA_ARCH__)
             input += __shfl_down_sync(0xFFFFFFFF, input, offset);

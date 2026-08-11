@@ -101,7 +101,6 @@ set(HEONGPU_KERNEL_SOURCES
     lib/kernel/encryption.cu
     lib/kernel/keygeneration.cu
     lib/kernel/multiplication.cu
-    lib/kernel/small_ntt.cu
     lib/kernel/switchkey.cu
 )
 

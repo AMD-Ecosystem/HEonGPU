@@ -69,34 +69,9 @@
 #define curand_normal               hiprand_normal
 #define curand_normal_double        hiprand_normal_double
 
-// Warp size abstraction for device code
-// On AMD CDNA (gfx9xx), wavefront is 64 lanes; on RDNA (gfx10xx/gfx11xx), it is 32.
-// Use kWarpSize for compile-time device code; use warpSize for runtime (correct on both).
-#if defined(__HIP_DEVICE_COMPILE__)
-#if defined(__GFX9__)
-static constexpr int kWarpSize = 64;   // CDNA: gfx90a, gfx94x
-#else
-static constexpr int kWarpSize = 32;   // RDNA: gfx10xx, gfx11xx
-#endif
-// For shuffle masks on HIP, we need 64-bit masks regardless of actual wavefront width
-#define FULL_WARP_MASK 0xFFFFFFFFFFFFFFFFULL
-#else
-// Host code: kWarpSize not used, but define for compatibility
-static constexpr int kWarpSize = 64;   // Upper bound for host-side sizing
-#define FULL_WARP_MASK 0xFFFFFFFFFFFFFFFFULL
-#endif
-
 #else // CUDA path
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
-
-// CUDA uses 32-lane warps everywhere
-#if defined(__CUDA_ARCH__)
-static constexpr int kWarpSize = 32;
-#else
-static constexpr int kWarpSize = 32;
-#endif
-#define FULL_WARP_MASK 0xFFFFFFFF
 
 #endif // USE_HIP
