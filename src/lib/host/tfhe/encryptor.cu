@@ -41,9 +41,10 @@ namespace heongpu
 
         std::uniform_int_distribution<uint64_t> dist64(0, UINT64_MAX);
         cuda_seed = dist64(rng);
-        cudaMalloc(&cuda_rng, context_->n_ * sizeof(curandState));
-
         total_state = 512 * 32;
+        HEONGPU_CUDA_CHECK(
+            cudaMalloc(&cuda_rng, total_state * sizeof(curandState)));
+
         initialize_random_states_kernel<<<((total_state + 511) >> 9), 512>>>(
             cuda_rng, cuda_seed, total_state);
     }
