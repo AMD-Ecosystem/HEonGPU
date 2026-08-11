@@ -81,6 +81,20 @@ public:
         return *this;
     }
 
+    // RMM offers no implicit copy, but does offer an explicit copy onto a given
+    // stream and memory resource. heongpu::DeviceVector forwards to it.
+    explicit device_uvector(const device_uvector& other, hipStream_t stream,
+                            mr::device_memory_resource* mr = nullptr)
+        : size_(other.size_), capacity_(other.size_), stream_(stream) {
+        if (size_ > 0) {
+            detail::check_hip_error(hipMalloc(&data_, size_ * sizeof(T)), "device_uvector allocation failed");
+            detail::check_hip_error(hipMemcpyAsync(data_, other.data_, size_ * sizeof(T),
+                          hipMemcpyDeviceToDevice, stream), "device_uvector copy failed");
+        } else {
+            data_ = nullptr;
+        }
+    }
+
     device_uvector(const device_uvector&) = delete;
     device_uvector& operator=(const device_uvector&) = delete;
 
