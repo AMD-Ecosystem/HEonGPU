@@ -29,13 +29,16 @@ function(add_example exe source)
         # Example sources include HEonGPU headers which transitively include
         # rocThrust; those require compilation as HIP source.
         set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
-        target_link_libraries(${exe} PRIVATE heongpu hip::host OpenMP::OpenMP_CXX)
+        target_link_libraries(${exe} PRIVATE heongpu hip::host)
         target_include_directories(${exe} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
         target_compile_definitions(${exe} PRIVATE USE_HIP)
-        # OpenMP::OpenMP_CXX only decorates the CXX language, so a HIP-compiled
-        # source needs the flag on both the compile and the link line.
-        target_compile_options(${exe} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${OpenMP_CXX_FLAGS}>)
-        target_link_options(${exe} PRIVATE $<$<LINK_LANGUAGE:HIP>:${OpenMP_CXX_FLAGS}>)
+        # OpenMP::OpenMP_CXX guards its compile options with
+        # $<COMPILE_LANGUAGE:CXX>, so it would not reach a source compiled as
+        # HIP, while its interface link libraries would still add the C++
+        # compiler's OpenMP runtime next to the one the HIP compiler links.
+        # Pass the flag to the HIP compile and link instead.
+        target_compile_options(${exe} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:SHELL:${OpenMP_CXX_FLAGS}>)
+        target_link_options(${exe} PRIVATE $<$<LINK_LANGUAGE:HIP>:SHELL:${OpenMP_CXX_FLAGS}>)
         set_target_properties(${exe} PROPERTIES
             POSITION_INDEPENDENT_CODE ON
             HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
