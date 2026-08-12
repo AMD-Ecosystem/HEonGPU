@@ -71,7 +71,11 @@
 
 #else // CUDA path
 
+// Deliberately no <curand_kernel.h> here. This header is reached from
+// heongpu.hpp by every host translation unit, and curand_mtgp32_kernel.h
+// redeclares threadIdx and blockDim with C++ linkage, which conflicts with the
+// C-linkage declarations in device_launch_parameters.h when a host compiler
+// sees both. The kernel headers that use curand include it themselves.
 #include <cuda_runtime.h>
-#include <curand_kernel.h>
 
 #endif // USE_HIP
