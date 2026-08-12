@@ -10,7 +10,24 @@
 
 namespace heongpu
 {
-    // Inline implementations for device functions to avoid cross-TU linking issues on HIP.
+    template <typename T>
+    __device__ void
+    SmallForwardNTT(T* polynomial_in_shared, const Root<T>* root_of_unity_table,
+                    const Modulus<T> modulus, bool reduction_poly_check);
+
+    template <typename T>
+    __device__ void
+    SmallInverseNTT(T* polynomial_in_shared, const Root<T>* root_of_unity_table,
+                    const Modulus<T> modulus, const Ninverse<T> n_inverse,
+                    bool reduction_poly_check);
+
+// The definitions live in the header, not in a translation unit of their own,
+// because the AMD GPU build compiles without relocatable device code and a
+// __device__ function called from another translation unit does not link there.
+// Only a device compiler may see them: this header is reached from heongpu.hpp,
+// so the host compiler parses it as well and must find the declarations alone.
+#if defined(__CUDACC__) || defined(__HIPCC__)
+
     template <typename T>
     __device__ inline void
     SmallForwardNTT(T* polynomial_in_shared, const Root<T>* root_of_unity_table,
@@ -128,6 +145,8 @@ namespace heongpu
 
         __syncthreads();
     }
+
+#endif // __CUDACC__ || __HIPCC__
 
 } // namespace heongpu
 
