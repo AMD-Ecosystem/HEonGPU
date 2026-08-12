@@ -73,6 +73,15 @@ Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP langu
     # Link your application against the HEonGPU library and the HIP runtime
     target_link_libraries(<your-target> PRIVATE HEonGPU::heongpu hip::host)
 
+The AMD build of the library holds relocatable device code, so the device link happens when your own target is linked and only the HIP compiler driver can perform it. The snippet above already satisfies this, because compiling ``main.cpp`` as HIP makes CMake link the target with HIP. A target that links the library but has no HIP source of its own does not get the HIP link and fails with undefined references to ``__hip_fatbin_*``; ask for the link explicitly there:
+
+.. code-block:: cmake
+
+    # Only needed when the target itself has no HIP sources
+    target_link_options(<your-target> PRIVATE --hip-link)
+
+Outside CMake, compile and link with ``hipcc -fgpu-rdc``. A plain ``g++`` link of the installed archive fails the same way.
+
 Project Roadmap
 ---------------
 

@@ -252,11 +252,16 @@ if(USE_HIP)
         HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
     )
     target_compile_definitions(heongpu PRIVATE USE_HIP)
-    # The archive holds relocatable device code, so whoever links it performs the
-    # device link. Carrying the flag on the interface, and into the installed
-    # export, keeps that a detail of this library rather than something every
-    # consumer has to know, exactly as CUDA_RESOLVE_DEVICE_SYMBOLS OFF below leaves
-    # the CUDA device link to the consumer.
+    # The archive holds relocatable device code, so the device link happens
+    # wherever it is linked, and only the HIP compiler driver in HIP link mode can
+    # perform it: any other link fails with undefined __hip_fatbin_* and
+    # __hip_gpubin_handle_* references. Carrying the flag on the interface, and
+    # into the installed export, gives a consumer that compiles its own sources
+    # as HIP the right link line automatically, but it cannot hide the
+    # requirement from a consumer whose target has no HIP source of its own, so
+    # docs/advanced_topics.rst tells them what to add. The CUDA path below leaves
+    # the device link to the consumer in the same way, which is why the same
+    # document tells a CUDA consumer to set CUDA_SEPARABLE_COMPILATION.
     target_compile_options(heongpu INTERFACE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
     target_link_options(heongpu INTERFACE -fgpu-rdc)
 else()
