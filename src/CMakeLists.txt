@@ -258,10 +258,14 @@ if(USE_HIP)
     # outright, and one driven by the HIP compiler without --hip-link fails with
     # undefined __hip_fatbin_* and __hip_gpubin_handle_* references. Carrying the
     # flag on the interface, and into the installed export, covers the first half
-    # for every consumer, since the export also records HIP as the link interface
-    # language and so hands the HIP driver even to a target with no HIP sources.
-    # CMake adds --hip-link only for a target that compiles a source of its own as
-    # HIP, so docs/advanced_topics.rst tells a consumer without one what to add.
+    # for a consumer whose own project enables the HIP language, since the export
+    # also records HIP as the link interface language and CMake then hands the HIP
+    # driver even to a target with no HIP sources. A consumer project that does not
+    # enable HIP cannot be helped from here: CMake links it with the C++ compiler,
+    # which rejects this flag. CMake adds --hip-link only for a target that
+    # compiles a source of its own as HIP, so docs/advanced_topics.rst states the
+    # language requirement first and then tells a consumer without such a source
+    # what to add.
     # The CUDA path below leaves the device link to the consumer in the same way,
     # which is why the same document tells a CUDA consumer to set
     # CUDA_SEPARABLE_COMPILATION.
