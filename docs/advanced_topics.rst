@@ -73,14 +73,14 @@ Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP langu
     # Link your application against the HEonGPU library and the HIP runtime
     target_link_libraries(<your-target> PRIVATE HEonGPU::heongpu hip::host)
 
-The AMD build of the library holds relocatable device code, so the device link happens when your own target is linked and only the HIP compiler driver can perform it. The snippet above already satisfies this, because compiling ``main.cpp`` as HIP makes CMake link the target with HIP. A target that links the library but has no HIP source of its own does not get the HIP link and fails with undefined references to ``__hip_fatbin_*``; ask for the link explicitly there:
+The AMD build of the library holds relocatable device code, so the device link happens when your own target is linked, and only the HIP compiler driver in HIP link mode can perform it. The installed package records HIP as the link interface language of ``HEonGPU::heongpu`` and carries ``-fgpu-rdc`` on its interface, so every CMake target that links it, directly or through another library of your own, is driven by the HIP compiler and gets that flag without asking. What CMake supplies only for a target that compiles a source of its own as HIP is HIP link mode itself; the snippet above has it because ``main.cpp`` is compiled as HIP. A target that links the library but has no HIP source of its own is therefore driven by the HIP compiler but not in HIP link mode, and fails with undefined references to ``__hip_fatbin_*`` and ``__hip_gpubin_handle_*``; ask for the mode explicitly there:
 
 .. code-block:: cmake
 
     # Only needed when the target itself has no HIP sources
     target_link_options(<your-target> PRIVATE --hip-link)
 
-Outside CMake, compile and link with ``hipcc -fgpu-rdc``. A plain ``g++`` link of the installed archive fails the same way.
+Naming the installed archive by path instead of going through ``find_package`` gives up all three pieces at once: the link is then driven by your C++ compiler and fails with the same undefined references, and reaching a working link takes ``LINKER_LANGUAGE HIP`` on the target together with ``--hip-link`` and ``-fgpu-rdc`` on its link line. Outside CMake, compile and link with ``hipcc -fgpu-rdc``.
 
 Project Roadmap
 ---------------
