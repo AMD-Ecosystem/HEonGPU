@@ -26,6 +26,10 @@ namespace heongpu
 // __device__ function called from another translation unit does not link there.
 // Only a device compiler may see them: this header is reached from heongpu.hpp,
 // so the host compiler parses it as well and must find the declarations alone.
+// Turning relocatable device code on for AMD instead (-fgpu-rdc, the
+// counterpart of the CUDA_SEPARABLE_COMPILATION the NVIDIA build sets) would
+// let the definitions stay in a file of their own, but it also leaves each
+// butterfly a cross-unit call that cannot be inlined into the kernel running it.
 #if defined(__CUDACC__) || defined(__HIPCC__)
 
     template <typename T>
