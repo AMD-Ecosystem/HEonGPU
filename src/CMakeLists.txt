@@ -15,6 +15,13 @@ function(heongpu_set_gpu_properties target_name sources)
             HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
         )
         target_compile_definitions(${target_name} PRIVATE USE_HIP)
+        # Relocatable device code, the counterpart of the CUDA_SEPARABLE_COMPILATION
+        # set below. SmallForwardNTT and SmallInverseNTT are __device__ functions
+        # defined in lib/kernel/small_ntt.cu and called from kernels in other
+        # translation units, which without this flag stops the HIP compile with
+        # "undefined hidden symbol". The device link that resolves it optimizes the
+        # linked device image as a whole, so the calls are still inlined.
+        target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
         # Add hip_compat shim headers before system includes
         target_include_directories(${target_name} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
     else()
@@ -101,6 +108,7 @@ set(HEONGPU_KERNEL_SOURCES
     lib/kernel/encryption.cu
     lib/kernel/keygeneration.cu
     lib/kernel/multiplication.cu
+    lib/kernel/small_ntt.cu
     lib/kernel/switchkey.cu
 )
 
@@ -244,6 +252,13 @@ if(USE_HIP)
         HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
     )
     target_compile_definitions(heongpu PRIVATE USE_HIP)
+    # The archive holds relocatable device code, so whoever links it performs the
+    # device link. Carrying the flag on the interface, and into the installed
+    # export, keeps that a detail of this library rather than something every
+    # consumer has to know, exactly as CUDA_RESOLVE_DEVICE_SYMBOLS OFF below leaves
+    # the CUDA device link to the consumer.
+    target_compile_options(heongpu INTERFACE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
+    target_link_options(heongpu INTERFACE -fgpu-rdc)
 else()
     set_target_properties(heongpu PROPERTIES
         VERSION ${PROJECT_VERSION}
