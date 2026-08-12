@@ -74,13 +74,14 @@
 // Deliberately no <curand_kernel.h> here. curand_mtgp32_kernel.h declares
 // threadIdx and blockDim with C++ linkage and device_launch_parameters.h
 // declares the same names with C linkage, and a host compiler rejects the pair
-// only in one order: curand first. Host translation units reach this header
-// first of all (util.cuh includes it ahead of everything else), and the
-// <cuda_runtime.h> below does not put device_launch_parameters.h in front,
-// because cuda_runtime.h includes it only under __CUDACC__. A curand include
-// here therefore always arrived first and broke every host .cpp. The kernel
-// headers that use curand include it themselves and are reached later, after
-// device_launch_parameters.h, which is the order that compiles.
+// only in one order: curand first. A host translation unit that reaches this
+// header before it has seen device_launch_parameters.h therefore fails, and the
+// <cuda_runtime.h> below does not put those declarations in front, because
+// cuda_runtime.h includes that header only under __CUDACC__. lib/heongpu.cpp is
+// such a translation unit -- it reaches this header through heongpu.hpp, well
+// ahead of the launch parameters -- and a curand include here broke it. The
+// kernel headers that use curand include it themselves and are reached after
+// the launch parameters, which is the order that compiles.
 #include <cuda_runtime.h>
 
 #endif // USE_HIP
