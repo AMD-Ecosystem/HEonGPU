@@ -15,13 +15,6 @@ function(heongpu_set_gpu_properties target_name sources)
             HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
         )
         target_compile_definitions(${target_name} PRIVATE USE_HIP)
-        # Relocatable device code, the counterpart of the CUDA_SEPARABLE_COMPILATION
-        # set below. SmallForwardNTT and SmallInverseNTT are __device__ functions
-        # defined in lib/kernel/small_ntt.cu and called from kernels in other
-        # translation units, which without this flag stops the HIP compile with
-        # "undefined hidden symbol". The device link that resolves it optimizes the
-        # linked device image as a whole, so the calls are still inlined.
-        target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
         # Add hip_compat shim headers before system includes
         target_include_directories(${target_name} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
     else()
@@ -108,7 +101,6 @@ set(HEONGPU_KERNEL_SOURCES
     lib/kernel/encryption.cu
     lib/kernel/keygeneration.cu
     lib/kernel/multiplication.cu
-    lib/kernel/small_ntt.cu
     lib/kernel/switchkey.cu
 )
 
@@ -252,25 +244,6 @@ if(USE_HIP)
         HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
     )
     target_compile_definitions(heongpu PRIVATE USE_HIP)
-    # The archive holds relocatable device code, so the device link happens
-    # wherever it is linked, and only the HIP compiler driver in HIP link mode can
-    # perform it. A link driven by the C++ compiler instead rejects -fgpu-rdc
-    # outright, and one driven by the HIP compiler without --hip-link fails with
-    # undefined __hip_fatbin_* and __hip_gpubin_handle_* references. Carrying the
-    # flag on the interface, and into the installed export, covers the first half
-    # for a consumer whose own project enables the HIP language, since the export
-    # also records HIP as the link interface language and CMake then hands the HIP
-    # driver even to a target with no HIP sources. A consumer project that does not
-    # enable HIP cannot be helped from here: CMake links it with the C++ compiler,
-    # which rejects this flag. CMake adds --hip-link only for a target that
-    # compiles a source of its own as HIP, so docs/advanced_topics.rst states the
-    # language requirement first and then tells a consumer without such a source
-    # what to add.
-    # The CUDA path below leaves the device link to the consumer in the same way,
-    # which is why the same document tells a CUDA consumer to set
-    # CUDA_SEPARABLE_COMPILATION.
-    target_compile_options(heongpu INTERFACE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
-    target_link_options(heongpu INTERFACE -fgpu-rdc)
 else()
     set_target_properties(heongpu PROPERTIES
         VERSION ${PROJECT_VERSION}
