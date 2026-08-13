@@ -287,6 +287,16 @@ namespace heongpu
     calculate_factor(const std::vector<Modulus64>& prime_vector,
                      const int Q_size, const int P_size);
 
+    // GMP's *_ui entry points take an unsigned long. That is 64 bits under the
+    // LP64 data model but only 32 under LLP64, while the moduli passed to them
+    // here are up to 60 bits wide, so passing one directly silently drops the
+    // high half. Importing the value as a single 64-bit word is exact on both
+    // models.
+    inline void set_mpz_u64(mpz_t output, Data64 value)
+    {
+        mpz_import(output, 1, -1, sizeof(Data64), 0, 0, &value);
+    }
+
     std::vector<Data64> calculate_Mi(const std::vector<Modulus64>& prime_vector,
                                      const int size);
 
