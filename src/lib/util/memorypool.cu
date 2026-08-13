@@ -3,6 +3,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
+#ifdef _WIN32
+// Must precede any other header that may pull in <windows.h>, so that the
+// min/max macros never reach the C++ standard library or Thrust.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <heongpu/util/memorypool.cuh>
 
 namespace heongpu
@@ -56,10 +68,18 @@ namespace heongpu
 
     size_t MemoryPool::get_host_avaliable_memory() const
     {
+#ifdef _WIN32
+        MEMORYSTATUSEX memInfo{};
+        memInfo.dwLength = sizeof(memInfo);
+        GlobalMemoryStatusEx(&memInfo);
+        size_t free_memory = static_cast<size_t>(memInfo.ullAvailPhys);
+        return free_memory;
+#else
         struct sysinfo memInfo;
         sysinfo(&memInfo);
         size_t free_memory = memInfo.freeram * memInfo.mem_unit;
         return free_memory;
+#endif
     }
 
     size_t MemoryPool::get_decive_avaliable_memory() const

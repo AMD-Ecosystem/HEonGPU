@@ -9,7 +9,6 @@
 #include <mutex>
 #include <memory>
 #include <vector>
-#include <sys/sysinfo.h>
 #include "gpuntt/common/common.cuh"
 #include "gpufft/complex.cuh"
 #include "rngongpu/rand_aes/aes_rng.cuh"

@@ -40,10 +40,15 @@ if(USE_HIP)
     endif()
     message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
 
-    set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} -g")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
-    set(CMAKE_HIP_FLAGS_DEBUG   "${CMAKE_HIP_FLAGS_DEBUG} -g")
-    set(CMAKE_HIP_FLAGS_RELEASE "${CMAKE_HIP_FLAGS_RELEASE} -O3")
+    # clang-cl takes the MSVC spellings and CMake already supplies /Zi and
+    # /O2 /Ob2 there, so these would be unused arguments -- which is fatal in
+    # a subproject that compiles with warnings as errors.
+    if(NOT MSVC)
+        set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} -g")
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+        set(CMAKE_HIP_FLAGS_DEBUG   "${CMAKE_HIP_FLAGS_DEBUG} -g")
+        set(CMAKE_HIP_FLAGS_RELEASE "${CMAKE_HIP_FLAGS_RELEASE} -O3")
+    endif()
 
     # Find hip and hiprand
     find_package(hip REQUIRED)
