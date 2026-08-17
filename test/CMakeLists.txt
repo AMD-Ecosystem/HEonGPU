@@ -42,8 +42,10 @@ set(EXECUTABLES
 function(add_test exe source)
     add_executable(${exe} ${source})
     if(USE_HIP)
-        # Test files include HEonGPU headers which transitively include rocThrust
-        # and other HIP headers. These require compilation as HIP source (hipcc).
+        # Test files include HEonGPU headers whose include chain carries device
+        # code (__umul64hi in GPU-NTT's modular_arith.cuh, warpSize in
+        # util.cuh), so they must be compiled as HIP sources -- the same reason
+        # they need nvcc on the CUDA side.
         set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
         target_link_libraries(${exe} PRIVATE heongpu gtest_main hip::host)
         target_include_directories(${exe} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)

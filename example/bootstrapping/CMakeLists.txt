@@ -16,8 +16,9 @@ set(EXECUTABLES
 function(add_example exe source)
     add_executable(${exe} ${source})
     if(USE_HIP)
-        # Example sources include HEonGPU headers which transitively include
-        # rocThrust; those require compilation as HIP source.
+        # Example sources include HEonGPU headers whose include chain carries
+        # device code (__umul64hi, warpSize), so they must be compiled as HIP
+        # sources -- the same reason they need nvcc on the CUDA side.
         set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
         target_link_libraries(${exe} PRIVATE heongpu hip::host)
         target_include_directories(${exe} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
