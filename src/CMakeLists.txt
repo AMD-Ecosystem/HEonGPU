@@ -271,47 +271,24 @@ target_include_directories(heongpu
         $<BUILD_INTERFACE:${HEONGPU_INCLUDE_ROOT}/util>
 )
 
-if(USE_HIP)
-    target_link_libraries(heongpu PUBLIC
-        ntt
-        fft
-        rngongpu
-        gmp
-        ntl
-        rmm
-        hip::hiprand
-        ZLIB::ZLIB
-    )
-else()
-    target_link_libraries(heongpu PUBLIC
-        ntt
-        fft
-        rngongpu
-        gmp
-        ntl
-        rmm
-        CUDA::curand
-        ZLIB::ZLIB
-    )
-endif()
-
-if(USE_HIP)
-    target_compile_options(heongpu PRIVATE
-        $<$<CONFIG:Release>:-O3 -DNDEBUG>
-        $<$<CONFIG:RelWithDebInfo>:-O3 -g -DNDEBUG>
-        $<$<CONFIG:MinSizeRel>:-Os -DNDEBUG>
-        $<$<CONFIG:Debug>:-g>
-    )
-else()
-    target_compile_options(heongpu PRIVATE
-        $<$<CONFIG:Release>:-O3 -DNDEBUG>
-        $<$<CONFIG:RelWithDebInfo>:-O3 -g -DNDEBUG>
-        $<$<CONFIG:MinSizeRel>:-Os -DNDEBUG>
-        $<$<CONFIG:Debug>:-g>
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
-        $<$<AND:$<CONFIG:RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
-    )
-endif()
+target_link_libraries(heongpu PUBLIC
+    ntt
+    fft
+    rngongpu
+    gmp
+    ntl
+    rmm
+    $<IF:$<BOOL:${USE_HIP}>,hip::hiprand,CUDA::curand>
+    ZLIB::ZLIB
+)
+target_compile_options(heongpu PRIVATE
+    $<$<CONFIG:Release>:-O3 -DNDEBUG>
+    $<$<CONFIG:RelWithDebInfo>:-O3 -g -DNDEBUG>
+    $<$<CONFIG:MinSizeRel>:-Os -DNDEBUG>
+    $<$<CONFIG:Debug>:-g>
+    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
+    $<$<AND:$<CONFIG:RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>
+)
 
 install(TARGETS heongpu
   EXPORT ${HEonGPU_TARGETS_EXPORT_NAME}
