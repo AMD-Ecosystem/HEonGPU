@@ -134,7 +134,7 @@ HEonGPU now includes support for **Multiparty Computation (MPC)** protocols, pro
 - [GCC](https://gcc.gnu.org/)
 - [GMP](https://gmplib.org/)
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=11.4 (NVIDIA GPUs)
-- [ROCm](https://rocm.docs.amd.com/) >=6.0 (AMD GPUs)
+- [ROCm](https://rocm.docs.amd.com/) >=7.2 (AMD GPUs)
 - [OpenSSL](https://www.openssl.org/) >= 1.1.0
 - [ZLIB](https://zlib.net/)
 
@@ -191,7 +191,7 @@ $ cmake --build ./build/
 $ sudo cmake --install build
 ```
 
-Default HIP architecture: `gfx90a`. Override with `-D CMAKE_HIP_ARCHITECTURES=<...>` to match your card.
+`CMAKE_HIP_ARCHITECTURES` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card.
 
 ### Uninstall
 

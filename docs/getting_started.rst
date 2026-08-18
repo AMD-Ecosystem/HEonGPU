@@ -16,7 +16,7 @@ Before building the library, ensure your development environment meets the follo
 * **GCC**: A modern C++ compiler with C++17 support
 * **GMP**: The GNU Multiple Precision Arithmetic Library
 * **CUDA Toolkit**: Version 11.4 or higher (for NVIDIA GPUs)
-* **ROCm**: Version 6.0 or higher (for AMD GPUs)
+* **ROCm**: Version 7.2 or higher (for AMD GPUs)
 * **OpenSSL**: Version 1.1.0 or higher
 * **ZLIB**: The data compression library
 
@@ -57,7 +57,7 @@ The library uses a standard CMake build process. The most critical configuration
        * - Ada Lovelace
          - 89, 90
 
-    On AMD GPUs, configure with ``-D USE_HIP=ON`` instead and set ``CMAKE_HIP_ARCHITECTURES`` to your card's target. This builds the GPU sources with HIP and uses hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by a bundled minimal implementation, since RMM itself requires CUDA.
+    On AMD GPUs, configure with ``-D USE_HIP=ON`` instead. ``CMAKE_HIP_ARCHITECTURES`` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card. This builds the GPU sources with HIP and uses hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by a bundled minimal implementation, since RMM itself requires CUDA.
 
     .. code-block:: bash
 
