@@ -40,7 +40,9 @@ else()
     FetchContent_Declare(
         rmm
         GIT_REPOSITORY https://github.com/AMD-Ecosystem/hipMM
-        GIT_TAG        release/rocmds-26.03
+        # release/rocmds-26.03 line, pinned by commit: hipMM publishes no
+        # release tags yet and the branch moves.
+        GIT_TAG        22732e49aa00ba179847e3b314371f2307f47a9a
         SOURCE_SUBDIR  cpp
     )
 endif()
