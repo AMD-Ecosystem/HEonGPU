@@ -26,7 +26,9 @@ message(STATUS "Thirdparty build completed successfully")
 include(FetchContent)
 
 # RMM (RAPIDS Memory Manager)
-# RMM depends on CUDA. For HIP builds, we use a simple stub implementation.
+# On HIP builds the same interface comes from hipMM, the ROCm-DS port of RMM,
+# which keeps RMM's target name, rmm:: namespace, and header layout, so the
+# sources that use rmm compile unchanged on both platforms.
 if(NOT USE_HIP)
     FetchContent_Declare(
         rmm
@@ -34,29 +36,26 @@ if(NOT USE_HIP)
         GIT_TAG        branch-25.08
         SOURCE_SUBDIR  cpp
     )
-    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(rmm)
 else()
-    # For HIP builds, create a stub rmm target that provides minimal compatibility
-    add_library(rmm INTERFACE)
-    target_include_directories(rmm INTERFACE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/rmm_hip_stub/include>
-        $<INSTALL_INTERFACE:include/rmm_hip_stub>)
-    # Use hip::host (not hip::device) to avoid propagating HIP compile flags
-    # to pure C++ consumers like test executables compiled with g++.
-    target_link_libraries(rmm INTERFACE hip::host)
-    # Install the interface library so exports work
-    install(TARGETS rmm EXPORT rmm_targets)
-    install(EXPORT rmm_targets DESTINATION lib/cmake/rmm)
-    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/rmm_hip_stub/include/ DESTINATION include/rmm_hip_stub)
-    # The installed HEonGPU config resolves rmm with find_package, which needs a
-    # config file next to the exported targets.
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/rmmConfig.cmake
-"include(CMakeFindDependencyMacro)
-find_dependency(hip REQUIRED)
-include(\"\${CMAKE_CURRENT_LIST_DIR}/rmm_targets.cmake\")
-")
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rmmConfig.cmake DESTINATION lib/cmake/rmm)
+    FetchContent_Declare(
+        rmm
+        GIT_REPOSITORY https://github.com/AMD-Ecosystem/hipMM
+        GIT_TAG        release/rocmds-26.03
+        SOURCE_SUBDIR  cpp
+    )
+endif()
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(rmm)
+if(USE_HIP)
+    # hipMM expects a HIP-capable compiler for its own sources (its hip
+    # dependency injects -x hip into their compile flags, which a plain C++
+    # compiler rejects). Compiling them as HIP sources satisfies that the same
+    # way this port compiles its own GPU sources.
+    get_target_property(_rmm_source_dir rmm SOURCE_DIR)
+    get_target_property(_rmm_sources rmm SOURCES)
+    list(TRANSFORM _rmm_sources PREPEND "${_rmm_source_dir}/")
+    set_source_files_properties(${_rmm_sources} TARGET_DIRECTORY rmm
+                                PROPERTIES LANGUAGE HIP)
 endif()
 
 # The submodules include <cuda_runtime.h> and <curand_kernel.h> by name. Putting

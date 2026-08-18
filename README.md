@@ -172,7 +172,7 @@ Available build types: `Debug`, `Release` (default), `RelWithDebInfo`, `MinSizeR
 
 #### AMD GPUs (ROCm)
 
-Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by a bundled minimal implementation, since RMM itself requires CUDA.
+Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by hipMM (https://github.com/AMD-Ecosystem/hipMM), the ROCm-DS port of RMM, which keeps RMM's API.
 
 <div align="center">
 
