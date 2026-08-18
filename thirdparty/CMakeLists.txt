@@ -25,6 +25,27 @@ message(STATUS "Thirdparty build completed successfully")
 
 include(FetchContent)
 
+if(USE_HIP AND MSVC)
+    # The fetched memory manager and the logging library it pulls in are built
+    # shared by default, and neither one works that way with an MSVC-style
+    # toolchain: their export macros expand to the ELF visibility attribute
+    # under __GNUC__ and to nothing otherwise, so the DLLs export no symbols,
+    # and the logger hides its spdlog symbols with the GNU-only linker option
+    # --exclude-libs, whose operand an MSVC-style link driver reads as an input
+    # file name. Building them static sidesteps both, and keeps their code in
+    # the executables instead of in DLLs the loader would have to find.
+    # See https://github.com/AMD-Ecosystem/rocmds-logger/pull/2 for the linker
+    # option; this stays useful after it lands, for the missing exports.
+    # Keep this a normal variable: under CMP0077 it makes the memory manager's
+    # option(BUILD_SHARED_LIBS ... ON) do nothing, so nothing reaches the cache
+    # and the setting stays scoped to this directory. Without it that option()
+    # writes BUILD_SHARED_LIBS=ON to the cache and the sibling test/ scope
+    # inherits it, which is what turns GoogleTest into a DLL. A cache entry
+    # here would instead override a user's own -DBUILD_SHARED_LIBS and outlive
+    # a later reconfigure with USE_HIP=OFF.
+    set(BUILD_SHARED_LIBS OFF)
+endif()
+
 # RMM (RAPIDS Memory Manager)
 # On HIP builds the same interface comes from hipMM, the ROCm-DS port of RMM,
 # which keeps RMM's target name, rmm:: namespace, and header layout, so the
