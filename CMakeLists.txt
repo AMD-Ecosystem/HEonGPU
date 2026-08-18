@@ -34,10 +34,8 @@ if(USE_HIP)
     set(CMAKE_HIP_STANDARD_REQUIRED ON)
     message(STATUS "HIP Standard: ${CMAKE_HIP_STANDARD}")
 
-    # Default HIP architecture when not specified
-    if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR CMAKE_HIP_ARCHITECTURES STREQUAL "")
-        set(CMAKE_HIP_ARCHITECTURES "gfx90a" CACHE STRING "HIP GPU architectures" FORCE)
-    endif()
+    # CMAKE_HIP_ARCHITECTURES is auto-detected from the local GPU when unset;
+    # set it explicitly to cross-compile for another architecture.
     message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
 
     # clang-cl takes the MSVC spellings and CMake already supplies /Zi and
