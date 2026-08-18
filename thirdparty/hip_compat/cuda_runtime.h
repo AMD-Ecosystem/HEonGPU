@@ -68,6 +68,18 @@
 #define cudaMallocAsync             hipMallocAsync
 #define cudaFreeAsync               hipFreeAsync
 
+// Memory info
+#define cudaMemGetInfo              hipMemGetInfo
+
+// Function attributes and occupancy
+#define cudaFuncSetAttribute        hipFuncSetAttribute
+#define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
+#define cudaOccupancyMaxPotentialBlockSize hipOccupancyMaxPotentialBlockSize
+
+// Device limits
+#define cudaDeviceSetLimit          hipDeviceSetLimit
+#define cudaLimitStackSize          hipLimitStackSize
+
 #else
 #include_next <cuda_runtime.h>
 #endif

@@ -6,7 +6,10 @@
 #ifndef HEONGPU_UTIL_H
 #define HEONGPU_UTIL_H
 
-#include <heongpu/cuda_to_hip.h>
+// No <curand_kernel.h> here: host translation units reach this header through
+// heongpu.hpp before device_launch_parameters.h, and that inclusion order does
+// not compile. The kernel headers that use cuRAND include it themselves.
+#include <cuda_runtime.h>
 #include "gpuntt/common/common.cuh"
 #include "gpuntt/common/nttparameters.cuh"
 #include <string>
