@@ -133,7 +133,8 @@ HEonGPU now includes support for **Multiparty Computation (MPC)** protocols, pro
 - [CMake](https://cmake.org/download/) >=3.30.4
 - [GCC](https://gcc.gnu.org/)
 - [GMP](https://gmplib.org/)
-- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=11.4
+- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=11.4 (NVIDIA GPUs)
+- [ROCm](https://rocm.docs.amd.com/) >=7.2 (AMD GPUs)
 - [OpenSSL](https://www.openssl.org/) >= 1.1.0
 - [ZLIB](https://zlib.net/)
 
@@ -168,6 +169,31 @@ $ cmake --build ./build/
 $ sudo cmake --install build
 ```
 Available build types: `Debug`, `Release` (default), `RelWithDebInfo`, `MinSizeRel`. Override with `-D CMAKE_BUILD_TYPE=<type>`. These propagate to all bundled libraries (GPU-FFT, GPU-NTT, RNGonGPU).
+
+#### AMD GPUs (ROCm)
+
+Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by hipMM (https://github.com/AMD-Ecosystem/hipMM), the ROCm-DS port of RMM, which keeps RMM's API.
+
+<div align="center">
+
+| GPU Architecture | Target (CMAKE_HIP_ARCHITECTURES Value) |
+|:----------------:|:---------------------------------------:|
+| CDNA2  | gfx90a |
+| CDNA3  | gfx942 |
+| RDNA3  | gfx1100, gfx1101, gfx1102 |
+| RDNA4  | gfx1200, gfx1201 |
+
+</div>
+
+```bash
+$ cmake -S . -B build -D USE_HIP=ON -D CMAKE_HIP_ARCHITECTURES=gfx90a -D CMAKE_BUILD_TYPE=Release
+$ cmake --build ./build/
+$ sudo cmake --install build
+```
+
+`CMAKE_HIP_ARCHITECTURES` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card.
+
+On an AMD GPU that shares its memory with the system, such as an APU, the default device memory pool takes 90% of the memory the runtime reports as available, and on such a part that is most of the whole machine rather than of a dedicated card; context creation and memory-heavy work slow down noticeably. Choose a smaller initial device pool at runtime, sized for what the application needs, as shown under Memory Pool Configuration (Runtime) below. Discrete cards keep the default, where reserving most of the dedicated VRAM is cheap.
 
 ### Uninstall
 

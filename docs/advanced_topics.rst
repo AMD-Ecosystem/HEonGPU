@@ -15,7 +15,11 @@ Key settings include:
 * **Polynomial Degree**: ``MAX_POLY_DEGREE`` (default: 65536) and ``MIN_POLY_DEGREE`` (default: 4096) define the supported range for polynomial degrees.
 * **Modulus Bit-Length**: These constants specify the valid bit-lengths for user-defined and general modulus values, ensuring cryptographic security.
 * **Galois Key Capability**: ``MAX_SHIFT`` (default: 8) controls the maximum rotation capability for default Galois key generation. If your application requires more rotation steps, this value must be increased.
-* **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 50% of VRAM and can grow to 80%, while the pinned host memory pool is initialized to 10% of RAM and can grow to 20%. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
+* **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 90% of the available VRAM and can grow to 95%, while the pinned host memory pool starts at a fixed 100 MB and can grow to 40% of the available RAM. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
+
+These defaults assume a discrete GPU with its own VRAM. On a GPU that shares its memory with the system, such as an integrated part or an APU, the runtime reports the machine's memory as device memory (``hipMemGetInfo`` in a ROCm build), so a pool expressed as a fraction of the available device memory reserves that fraction of the whole machine. A 90% initial device pool on an otherwise idle machine with 72 GB of shared memory therefore asks for roughly 65 GB before a single ciphertext exists, leaving little for anything else, and both context creation and memory-heavy work have been observed to slow down markedly on such a part.
+
+On such a system, size the initial device pool for what the application actually needs, as a small fraction of memory or as a fixed size of a gigabyte or two, rather than leaving it at the discrete-card default. The setting is per application and needs no rebuild: fill in ``initial_device_fraction`` or ``initial_device_bytes`` on a ``MemoryPoolConfig`` and pass it to ``context->generate()``. ``example/basic/3_basic_memorypool_config.cpp`` shows the mechanism, though the sizes it passes are themselves discrete-card sizes. The compiled defaults are unchanged and remain the right choice for a discrete card, where 90% of dedicated VRAM is a cheap reservation that nothing else on the system competes for.
 
 Multiparty Computation (MPC)
 ----------------------------
@@ -50,6 +54,28 @@ To integrate HEonGPU into your own CMake project, first ensure the library is in
 
     # Enable separable compilation for CUDA, which is often required
     set_target_properties(<your-target> PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP language and the HIP runtime instead. Sources that include the HEonGPU headers must be compiled as HIP, because the header chain carries device code -- the same reason those headers require nvcc in a CUDA build.
+
+.. code-block:: cmake
+
+    # Set the project language to include HIP
+    project(<your-project> LANGUAGES CXX HIP)
+
+    # Find HIP, which is a dependency
+    find_package(hip REQUIRED)
+
+    # ... your other project configurations ...
+
+    # Find the HEonGPU package
+    find_package(HEonGPU REQUIRED)
+
+    # ... define your executable target ...
+    add_executable(<your-target> main.cpp)
+    set_source_files_properties(main.cpp PROPERTIES LANGUAGE HIP)
+
+    # Link your application against the HEonGPU library and the HIP runtime
+    target_link_libraries(<your-target> PRIVATE HEonGPU::heongpu hip::host)
 
 Project Roadmap
 ---------------

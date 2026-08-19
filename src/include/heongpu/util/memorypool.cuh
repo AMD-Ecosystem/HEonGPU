@@ -10,7 +10,9 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#ifndef _WIN32
 #include <sys/sysinfo.h>
+#endif
 
 #include "gpuntt/common/common.cuh"
 #include "gpuntt/common/nttparameters.cuh"
