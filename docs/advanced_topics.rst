@@ -17,6 +17,10 @@ Key settings include:
 * **Galois Key Capability**: ``MAX_SHIFT`` (default: 8) controls the maximum rotation capability for default Galois key generation. If your application requires more rotation steps, this value must be increased.
 * **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 90% of VRAM and can grow to 95%, while the pinned host memory pool is initialized to 30% of RAM and can grow to 40%. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
 
+These defaults assume a discrete GPU with its own VRAM. On a GPU that shares its memory with the system, such as an integrated part or an APU, the runtime reports the machine's entire memory as device memory (``hipMemGetInfo`` in a ROCm build), so a pool expressed as a fraction of device memory reserves that fraction of everything the machine has. A 90% initial device pool on a machine with 72 GB of shared memory therefore asks for roughly 65 GB before a single ciphertext exists, and that reservation is not free: context creation grows from about one second to about ten, and memory-heavy workloads can take roughly twice as long.
+
+On such a system, prefer an initial device pool of 10% or less, or a fixed size of one or two gigabytes, which performs as well as running with no pool at all. 50% is not a safe middle ground, being already about twice as slow as 10% on heavy work. The setting is per application and needs no rebuild: fill in ``initial_device_fraction`` or ``initial_device_bytes`` on a ``MemoryPoolConfig`` and pass it to ``context->generate()``, as ``example/basic/3_basic_memorypool_config.cpp`` demonstrates. The compiled defaults are unchanged and remain the right choice for a discrete card, where 90% of dedicated VRAM is a cheap reservation that nothing else on the system competes for.
+
 Multiparty Computation (MPC)
 ----------------------------
 
