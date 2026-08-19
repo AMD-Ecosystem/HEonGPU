@@ -193,7 +193,7 @@ $ sudo cmake --install build
 
 `CMAKE_HIP_ARCHITECTURES` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card.
 
-On an AMD GPU that shares its memory with the system, such as an APU, the default device memory pool takes 90% of the memory the runtime reports, and that is 90% of the whole machine rather than of a dedicated card; it slows context creation and memory-heavy work noticeably. Choose a smaller initial device pool at runtime, 10% or less or a fixed one to two gigabytes, as shown under Memory Pool Configuration (Runtime) below. Discrete cards keep the default, where reserving most of the dedicated VRAM is cheap.
+On an AMD GPU that shares its memory with the system, such as an APU, the default device memory pool takes 90% of the memory the runtime reports as available, and on such a part that is most of the whole machine rather than of a dedicated card; context creation and memory-heavy work slow down noticeably. Choose a smaller initial device pool at runtime, sized for what the application needs, as shown under Memory Pool Configuration (Runtime) below. Discrete cards keep the default, where reserving most of the dedicated VRAM is cheap.
 
 ### Uninstall
 
