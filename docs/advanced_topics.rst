@@ -15,7 +15,7 @@ Key settings include:
 * **Polynomial Degree**: ``MAX_POLY_DEGREE`` (default: 65536) and ``MIN_POLY_DEGREE`` (default: 4096) define the supported range for polynomial degrees.
 * **Modulus Bit-Length**: These constants specify the valid bit-lengths for user-defined and general modulus values, ensuring cryptographic security.
 * **Galois Key Capability**: ``MAX_SHIFT`` (default: 8) controls the maximum rotation capability for default Galois key generation. If your application requires more rotation steps, this value must be increased.
-* **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 50% of VRAM and can grow to 80%, while the pinned host memory pool is initialized to 10% of RAM and can grow to 20%. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
+* **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 90% of VRAM and can grow to 95%, while the pinned host memory pool is initialized to 30% of RAM and can grow to 40%. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
 
 Multiparty Computation (MPC)
 ----------------------------
