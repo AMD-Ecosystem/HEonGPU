@@ -147,7 +147,18 @@ if(HEonGPU_BUILD_SHARED)
         target_compile_definitions(heongpu_test_${plugin}
             PRIVATE HEONGPU_PLUGIN=${plugin})
         target_link_libraries(heongpu_test_${plugin} PRIVATE heongpu)
+        if(USE_HIP)
+            target_link_libraries(heongpu_test_${plugin} PRIVATE hip::host)
+            target_include_directories(heongpu_test_${plugin} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)
+            target_compile_definitions(heongpu_test_${plugin} PRIVATE USE_HIP)
+            set_target_properties(heongpu_test_${plugin} PROPERTIES
+                HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
+            )
+        endif()
     endforeach()
+    if(USE_HIP)
+        set_source_files_properties(shared_state_plugin.cpp PROPERTIES LANGUAGE HIP)
+    endif()
     add_test(shared_state_testcases test_shared_state.cpp)
     target_link_libraries(shared_state_testcases
         PRIVATE heongpu_test_plugin_a heongpu_test_plugin_b)
