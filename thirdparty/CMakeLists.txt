@@ -5,7 +5,8 @@
 # Developer: Alişah Özcan
 
 # GPU-NTT, GPU-FFT and RNGonGPU are git submodules. Configuring does not fetch
-# them, so it needs no network and does not change the source tree.
+# them, so it needs no network and does not change the source tree, except that
+# a HIP build applies the patches below to the submodule checkouts.
 foreach(_heongpu_submodule IN ITEMS GPU-FFT GPU-NTT RNGonGPU)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_heongpu_submodule}/CMakeLists.txt")
         message(FATAL_ERROR

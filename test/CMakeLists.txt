@@ -82,10 +82,9 @@ set(EXECUTABLES
 function(add_test exe source)
     add_executable(${exe} ${source})
     if(USE_HIP)
-        # Test files include HEonGPU headers whose include chain carries device
-        # code (__umul64hi in GPU-NTT's modular_arith.cuh, warpSize in
-        # util.cuh), so they must be compiled as HIP sources -- the same reason
-        # they need nvcc on the CUDA side.
+        # Test files include HEonGPU headers that use __umul64hi and warpSize in
+        # non-template device functions (GPU-NTT's modular_arith.cuh, util.cuh).
+        # The HIP headers declare those only when a source is compiled as HIP.
         set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
         target_link_libraries(${exe} PRIVATE heongpu GTest::gtest_main hip::host)
         target_include_directories(${exe} SYSTEM BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/hip_compat)

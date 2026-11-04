@@ -128,7 +128,7 @@ This applies to the default static library (``libheongpu.a``), which leaves the 
 
 The shared library is versioned with the major and minor version (for example ``libheongpu.so.1.4``), because its ABI can change between minor versions. Its kernels are internal and cannot be launched from outside the library.
 
-Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP language and the HIP runtime instead. Sources that include the HEonGPU headers must be compiled as HIP, because the header chain carries device code -- the same reason those headers require nvcc in a CUDA build.
+Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP language and the HIP runtime instead. Sources that include the HEonGPU headers must be compiled as HIP: the headers use ``__umul64hi`` and ``warpSize`` in device functions, and the HIP headers declare those only when a source is compiled as HIP.
 
 .. code-block:: cmake
 
