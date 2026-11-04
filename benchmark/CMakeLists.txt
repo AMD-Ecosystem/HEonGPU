@@ -16,8 +16,8 @@ function(add_benchmark exe source)
     add_executable(${exe} ${source})
     if(USE_HIP)
         # Benchmark sources include HEonGPU headers that use __umul64hi and
-        # warpSize in non-template device functions (GPU-NTT's
-        # modular_arith.cuh, util.cuh). The HIP headers declare those only when
+        # warpSize in non-template device functions (util.cuh,
+        # bigintegerarith.cuh). The HIP headers declare those only when
         # a source is compiled as HIP.
         set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
         target_link_libraries(${exe} PRIVATE heongpu hip::host)
