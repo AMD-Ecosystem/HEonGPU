@@ -46,7 +46,7 @@ namespace heongpu
          * decryption.
          */
         __host__ HEDecryptor(HEContext<Scheme::CKKS> context,
-                             Secretkey<Scheme::CKKS>& secret_key);
+                             const Secretkey<Scheme::CKKS>& secret_key);
 
         /**
          * @brief Decrypts a ciphertext into a plaintext, automatically
@@ -58,9 +58,15 @@ namespace heongpu
          */
         __host__ void
         decrypt(Plaintext<Scheme::CKKS>& plaintext,
-                Ciphertext<Scheme::CKKS>& ciphertext,
+                const Ciphertext<Scheme::CKKS>& ciphertext,
                 const ExecutionOptions& options = ExecutionOptions())
         {
+            ciphertext.validate_context(context_);
+            if (ciphertext.cipher_size_ != 2 || !ciphertext.in_ntt_domain_)
+            {
+                throw std::invalid_argument(
+                    "CKKS decryption requires a size-2 NTT ciphertext!");
+            }
             input_storage_manager(
                 ciphertext,
                 [&](Ciphertext<Scheme::CKKS>& ciphertext_)
@@ -69,52 +75,46 @@ namespace heongpu
                         plaintext,
                         [&](Plaintext<Scheme::CKKS>& plaintext_)
                         {
-                            decrypt_ckks(plaintext_, ciphertext,
+                            decrypt_ckks(plaintext_, ciphertext_,
                                          options.stream_);
 
-                            plaintext.plain_size_ =
-                                context_->n * context_->Q_size;
-                            plaintext.scheme_ = context_->scheme_;
-                            plaintext.depth_ = ciphertext.depth_;
-                            plaintext.scale_ = ciphertext.scale_;
-                            plaintext.in_ntt_domain_ = true;
-                            plaintext.encoding_ = ciphertext.encoding_;
-                            plaintext.plaintext_generated_ = true;
+                            plaintext_.plain_size_ =
+                                context_->n *
+                                (context_->Q_size - ciphertext_.depth_);
+                            plaintext_.scheme_ = context_->scheme_;
+                            plaintext_.context_id_ = context_->context_id_;
+                            plaintext_.depth_ = ciphertext_.depth_;
+                            plaintext_.scale_ = ciphertext_.scale_;
+                            plaintext_.in_ntt_domain_ = true;
+                            plaintext_.encoding_ = ciphertext_.encoding_;
+                            plaintext_.plaintext_generated_ = true;
                         },
                         options);
                 },
                 options, false);
         }
 
-        /**
-         * @brief Returns the seed of the decryptor.
-         *
-         * @return int Seed of the decryptor.
-         */
-        inline int get_seed() const noexcept { return seed_; }
-
-        /**
-         * @brief Sets the seed of the decryptor with new seed.
-         */
-        inline void set_seed(int new_seed) { seed_ = new_seed; }
-
-        /**
-         * @brief Returns the offset of the decryptor(curand).
-         *
-         * @return int Offset of the decryptor.
-         */
-        inline int get_offset() const noexcept { return offset_; }
-
-        /**
-         * @brief Sets the offset of the decryptor with new offset(curand).
-         */
-        inline void set_offset(int new_offset) { offset_ = new_offset; }
-
         HEDecryptor() = default;
         HEDecryptor(const HEDecryptor& copy) = default;
         HEDecryptor(HEDecryptor&& source) = default;
         HEDecryptor& operator=(const HEDecryptor& assign) = default;
         HEDecryptor& operator=(HEDecryptor&& assign) = default;
+
+        // Value-returning versions of the functions above. They give the
+        // same results.
+
+        /**
+         * @brief Returns ciphertext decrypted into a new plaintext; see
+         * decrypt(plaintext, ciphertext).
+         */
+        __host__ Plaintext<Scheme::CKKS>
+        decrypt(const Ciphertext<Scheme::CKKS>& ciphertext,
+                const ExecutionOptions& options = ExecutionOptions())
+        {
+            Plaintext<Scheme::CKKS> output(context_, options);
+            decrypt(output, ciphertext, options);
+            return output;
+        }
 
       private:
         __host__ void decrypt_ckks(Plaintext<Scheme::CKKS>& plaintext,
@@ -134,8 +134,6 @@ namespace heongpu
 
       private:
         HEContext<Scheme::CKKS> context_;
-        int seed_;
-        int offset_; // Absolute offset into sequence (curand)
 
         DeviceVector<Data64> secret_key_;
     };

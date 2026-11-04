@@ -1,9 +1,12 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
 #include <heongpu/host/ckks/context.cuh>
+#include <heongpu/util/runtime.cuh>
+#include <cmath>
 
 namespace heongpu
 {
@@ -13,7 +16,6 @@ namespace heongpu
         {
             scheme_ = scheme_type::ckks;
             sec_level_ = sec_level;
-            keyswitching_type_ = keyswitching_type::NONE;
         }
         else
         {
@@ -64,16 +66,8 @@ namespace heongpu
                     "log_P_bases_bit_sizes cannot be empty!");
             }
 
-            keyswitching_type_ =
-                (log_P_bases_bit_sizes.size() == 1)
-                    ? keyswitching_type::KEYSWITCHING_METHOD_I
-                    : keyswitching_type::KEYSWITCHING_METHOD_II;
-
-            if (!coefficient_validator(log_Q_bases_bit_sizes,
-                                       log_P_bases_bit_sizes))
-            {
-                throw std::logic_error("P should be bigger than Q pairs!");
-            }
+            validate_key_switching_digits(log_Q_bases_bit_sizes,
+                                          log_P_bases_bit_sizes);
 
             // Q' = Q x P
             Qprime_mod_bit_sizes_ = log_Q_bases_bit_sizes;
@@ -106,7 +100,9 @@ namespace heongpu
                     max_coeff_bit_count = heongpu_256bit_std_parms(n);
                     break;
                 default:
-                    throw std::runtime_error("Invalid security level");
+                    throw std::runtime_error(error_message(
+                        "Invalid security level ", static_cast<int>(sec_level_),
+                        "! Expected sec128, sec192 or sec256."));
                     break;
             }
 
@@ -173,17 +169,8 @@ namespace heongpu
                     "log_P_bases_bit_sizes cannot be empty!");
             }
 
-            keyswitching_type_ =
-                (log_P_bases_bit_sizes.size() == 1)
-                    ? keyswitching_type::KEYSWITCHING_METHOD_I
-                    : keyswitching_type::KEYSWITCHING_METHOD_II;
-
-            if (!coefficient_validator(log_Q_bases_bit_sizes,
-                                       log_P_bases_bit_sizes))
-            {
-                throw std::logic_error(
-                    "Invalid parameters, P should be bigger than Q pairs!");
-            }
+            validate_key_switching_digits(log_Q_bases_bit_sizes,
+                                          log_P_bases_bit_sizes);
 
             // Q' = Q x P
             Qprime_mod_bit_sizes_ = log_Q_bases_bit_sizes;
@@ -216,7 +203,9 @@ namespace heongpu
                     max_coeff_bit_count = heongpu_256bit_std_parms(n);
                     break;
                 default:
-                    throw std::runtime_error("Invalid security level");
+                    throw std::runtime_error(error_message(
+                        "Invalid security level ", static_cast<int>(sec_level_),
+                        "! Expected sec128, sec192 or sec256."));
                     break;
             }
 
@@ -264,6 +253,89 @@ namespace heongpu
         }
     }
 
+    void HEContextImpl<Scheme::CKKS>::set_rescale_mode(rescale_mode mode,
+                                                       double scale,
+                                                       int top_level)
+    {
+        if (!coeff_modulus_specified_)
+        {
+            throw StateError("The rescale mode needs the moduli! Set them "
+                             "before set_rescale_mode.");
+        }
+        switch (mode)
+        {
+            case rescale_mode::manual:
+                level_scales_.clear();
+                break;
+            case rescale_mode::automatic:
+            {
+                if (!(scale > 0.0) || !std::isfinite(scale))
+                {
+                    throw ParameterError(error_message(
+                        "Invalid scale ", scale,
+                        " for the automatic rescale mode! Expected a "
+                        "positive scale, the scale of the top level."));
+                }
+                if (top_level == -1)
+                {
+                    top_level = Q_size - 1;
+                }
+                if ((top_level < 0) || (top_level >= Q_size))
+                {
+                    throw ParameterError(error_message(
+                        "Invalid top level ", top_level,
+                        " for the automatic rescale mode! Expected 0 to ",
+                        Q_size - 1, ", or -1 for the top level."));
+                }
+                // The scale a multiplication of two ciphertexts of level l
+                // and a rescaling give, computed as the operators do.
+                level_scales_.assign(Q_size, 0.0);
+                level_scales_[top_level] = scale;
+                top_level_ = top_level;
+                for (int level = top_level; level > 0; level--)
+                {
+                    double square = level_scales_[level] * level_scales_[level];
+                    level_scales_[level - 1] =
+                        square /
+                        static_cast<double>(prime_vector_[level].value);
+                }
+                break;
+            }
+            default:
+                throw ParameterError(error_message(
+                    "Invalid rescale mode ", static_cast<int>(mode), "!"));
+        }
+        rescale_mode_ = mode;
+    }
+
+    double HEContextImpl<Scheme::CKKS>::get_level_scale(int level) const
+    {
+        if (rescale_mode_ != rescale_mode::automatic)
+        {
+            throw StateError("Levels have scales only in the automatic "
+                             "rescale mode!");
+        }
+        if ((level < 0) || (level >= static_cast<int>(level_scales_.size())))
+        {
+            throw ParameterError(error_message("Invalid level ", level,
+                                               "! Expected 0 to ",
+                                               level_scales_.size() - 1, "."));
+        }
+        if (level > top_level_)
+        {
+            throw LevelMismatchError(error_message(
+                "Level ", level, " is above the top level ", top_level_,
+                " of the automatic rescale mode and has no scale!"));
+        }
+        return level_scales_[level];
+    }
+
+    int HEContextImpl<Scheme::CKKS>::get_top_level() const noexcept
+    {
+        return (rescale_mode_ == rescale_mode::automatic) ? top_level_
+                                                          : Q_size - 1;
+    }
+
     void HEContextImpl<Scheme::CKKS>::generate()
     {
         generate(MemoryPoolConfig::Defaults());
@@ -275,28 +347,8 @@ namespace heongpu
         if ((!context_generated_) && (poly_modulus_degree_specified_) &&
             (coeff_modulus_specified_))
         {
-            // Memory pool initialization
-            MemoryPool::instance().initialize(pool_config);
-            MemoryPool::instance().use_memory_pool(pool_config.use_memory_pool);
-            cudaDeviceSynchronize();
-
-            // DRNG initialization
-            std::vector<unsigned char> generated_entropy(16); // for 128 bit
-            if (1 !=
-                RAND_bytes(generated_entropy.data(), generated_entropy.size()))
-                throw std::runtime_error("RAND_bytes failed");
-            std::vector<unsigned char> generated_nonce(8); // for 128 bit
-            if (1 !=
-                RAND_bytes(generated_entropy.data(), generated_entropy.size()))
-                throw std::runtime_error("RAND_bytes failed");
-            std::vector<unsigned char> personalization_string = {};
-            RandomNumberGenerator::instance().initialize(
-                generated_entropy, generated_nonce, personalization_string,
-                rngongpu::SecurityLevel::AES128, false);
-            cudaDeviceSynchronize();
-
-            // For kernel stack size
-            cudaDeviceSetLimit(cudaLimitStackSize, 2048);
+            // Memory pool, random number generator and kernel stack size.
+            heongpu::initialize(pool_config);
 
             modulus_ = std::make_shared<DeviceVector<Modulus64>>(prime_vector_);
 
@@ -441,95 +493,74 @@ namespace heongpu
 
             //////////////////////////////////
 
-            switch (static_cast<int>(keyswitching_type_))
+            KeySwitchParameterGenerator pool_ckks(n, base_q, P_size, scheme_);
+
+            m_leveled = pool_ckks.m;
+            l_leveled = std::make_shared<std::vector<int>>(pool_ckks.level_Q_);
+            l_tilda_leveled =
+                std::make_shared<std::vector<int>>(pool_ckks.level_Qtilda_);
+
+            d_leveled = std::make_shared<std::vector<int>>(pool_ckks.level_d_);
+
+            std::vector<std::vector<Data64>>
+                base_change_matrix_D_to_Qtilda_vec =
+                    pool_ckks.level_base_change_matrix_D_to_Qtilda();
+
+            std::vector<std::vector<Data64>> Mi_inv_D_to_Qtilda_vec =
+                pool_ckks.level_Mi_inv_D_to_Qtilda();
+
+            std::vector<std::vector<Data64>> prod_D_to_Qtilda_vec =
+                pool_ckks.level_prod_D_to_Qtilda();
+
+            std::vector<std::vector<int>> I_j_vec = pool_ckks.level_I_j();
+
+            std::vector<std::vector<int>> I_location_vec =
+                pool_ckks.level_I_location();
+
+            std::vector<std::vector<int>> Sk_pair_new_vec =
+                pool_ckks.level_sk_pair();
+
+            base_change_matrix_D_to_Qtilda_leveled =
+                std::make_shared<std::vector<DeviceVector<Data64>>>();
+            Mi_inv_D_to_Qtilda_leveled =
+                std::make_shared<std::vector<DeviceVector<Data64>>>();
+            prod_D_to_Qtilda_leveled =
+                std::make_shared<std::vector<DeviceVector<Data64>>>();
+            I_j_leveled = std::make_shared<std::vector<DeviceVector<int>>>();
+            I_location_leveled =
+                std::make_shared<std::vector<DeviceVector<int>>>();
+            Sk_pair_leveled =
+                std::make_shared<std::vector<DeviceVector<int>>>();
+
+            for (int pool_lp = 0;
+                 pool_lp < base_change_matrix_D_to_Qtilda_vec.size(); pool_lp++)
             {
-                case 1: // KEYSWITCHING_METHOD_I
-                    // Deafult
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                {
-                    KeySwitchParameterGenerator pool_ckks(
-                        n, base_q, P_size, scheme_, keyswitching_type_);
+                DeviceVector<Data64>
+                    base_change_matrix_D_to_Qtilda_leveled_inner(
+                        base_change_matrix_D_to_Qtilda_vec[pool_lp]);
+                DeviceVector<Data64> Mi_inv_D_to_Qtilda_leveled_inner(
+                    Mi_inv_D_to_Qtilda_vec[pool_lp]);
+                DeviceVector<Data64> prod_D_to_Qtilda_leveled_inner(
+                    prod_D_to_Qtilda_vec[pool_lp]);
 
-                    m_leveled = pool_ckks.m;
-                    l_leveled =
-                        std::make_shared<std::vector<int>>(pool_ckks.level_Q_);
-                    l_tilda_leveled = std::make_shared<std::vector<int>>(
-                        pool_ckks.level_Qtilda_);
+                base_change_matrix_D_to_Qtilda_leveled->push_back(
+                    std::move(base_change_matrix_D_to_Qtilda_leveled_inner));
+                Mi_inv_D_to_Qtilda_leveled->push_back(
+                    std::move(Mi_inv_D_to_Qtilda_leveled_inner));
+                prod_D_to_Qtilda_leveled->push_back(
+                    std::move(prod_D_to_Qtilda_leveled_inner));
 
-                    d_leveled =
-                        std::make_shared<std::vector<int>>(pool_ckks.level_d_);
+                DeviceVector<int> I_j_vec_inner(I_j_vec[pool_lp]);
+                DeviceVector<int> I_location_vec_inner(I_location_vec[pool_lp]);
+                DeviceVector<int> Sk_pair_new_vec_inner(
+                    Sk_pair_new_vec[pool_lp]);
 
-                    std::vector<std::vector<Data64>>
-                        base_change_matrix_D_to_Qtilda_vec =
-                            pool_ckks.level_base_change_matrix_D_to_Qtilda();
-
-                    std::vector<std::vector<Data64>> Mi_inv_D_to_Qtilda_vec =
-                        pool_ckks.level_Mi_inv_D_to_Qtilda();
-
-                    std::vector<std::vector<Data64>> prod_D_to_Qtilda_vec =
-                        pool_ckks.level_prod_D_to_Qtilda();
-
-                    std::vector<std::vector<int>> I_j_vec =
-                        pool_ckks.level_I_j();
-
-                    std::vector<std::vector<int>> I_location_vec =
-                        pool_ckks.level_I_location();
-
-                    std::vector<std::vector<int>> Sk_pair_new_vec =
-                        pool_ckks.level_sk_pair();
-
-                    base_change_matrix_D_to_Qtilda_leveled =
-                        std::make_shared<std::vector<DeviceVector<Data64>>>();
-                    Mi_inv_D_to_Qtilda_leveled =
-                        std::make_shared<std::vector<DeviceVector<Data64>>>();
-                    prod_D_to_Qtilda_leveled =
-                        std::make_shared<std::vector<DeviceVector<Data64>>>();
-                    I_j_leveled =
-                        std::make_shared<std::vector<DeviceVector<int>>>();
-                    I_location_leveled =
-                        std::make_shared<std::vector<DeviceVector<int>>>();
-                    Sk_pair_leveled =
-                        std::make_shared<std::vector<DeviceVector<int>>>();
-
-                    for (int pool_lp = 0;
-                         pool_lp < base_change_matrix_D_to_Qtilda_vec.size();
-                         pool_lp++)
-                    {
-                        DeviceVector<Data64>
-                            base_change_matrix_D_to_Qtilda_leveled_inner(
-                                base_change_matrix_D_to_Qtilda_vec[pool_lp]);
-                        DeviceVector<Data64> Mi_inv_D_to_Qtilda_leveled_inner(
-                            Mi_inv_D_to_Qtilda_vec[pool_lp]);
-                        DeviceVector<Data64> prod_D_to_Qtilda_leveled_inner(
-                            prod_D_to_Qtilda_vec[pool_lp]);
-
-                        base_change_matrix_D_to_Qtilda_leveled->push_back(
-                            std::move(
-                                base_change_matrix_D_to_Qtilda_leveled_inner));
-                        Mi_inv_D_to_Qtilda_leveled->push_back(
-                            std::move(Mi_inv_D_to_Qtilda_leveled_inner));
-                        prod_D_to_Qtilda_leveled->push_back(
-                            std::move(prod_D_to_Qtilda_leveled_inner));
-
-                        DeviceVector<int> I_j_vec_inner(I_j_vec[pool_lp]);
-                        DeviceVector<int> I_location_vec_inner(
-                            I_location_vec[pool_lp]);
-                        DeviceVector<int> Sk_pair_new_vec_inner(
-                            Sk_pair_new_vec[pool_lp]);
-
-                        I_j_leveled->push_back(std::move(I_j_vec_inner));
-                        I_location_leveled->push_back(
-                            std::move(I_location_vec_inner));
-                        Sk_pair_leveled->push_back(
-                            std::move(Sk_pair_new_vec_inner));
-                    }
-                }
-                break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
+                I_j_leveled->push_back(std::move(I_j_vec_inner));
+                I_location_leveled->push_back(std::move(I_location_vec_inner));
+                Sk_pair_leveled->push_back(std::move(Sk_pair_new_vec_inner));
             }
+            context_id_ = context_identity(static_cast<int>(scheme_), n,
+                                           prime_vector_, 0);
             context_generated_ = true;
         }
         else
@@ -538,50 +569,55 @@ namespace heongpu
         }
     }
 
-    void HEContextImpl<Scheme::CKKS>::print_parameters()
+    void HEContextImpl<Scheme::CKKS>::print_parameters(std::ostream& os) const
     {
         if (context_generated_)
         {
             std::string scheme_string = "CKKS";
 
-            std::cout << "==== HEonGPU a GPU Based Homomorphic Encryption "
-                         "Library ====\n"
-                      << std::endl;
-            std::cout << "Encryption parameters:" << std::endl;
-            std::cout << "-->   scheme: " << scheme_string << std::endl;
-            std::cout << "-->   poly_modulus_degree: " << n << std::endl;
-            std::cout << "-->   Q_tilta size: Q( ";
+            os << "==== HEonGPU a GPU Based Homomorphic Encryption "
+                  "Library ====\n"
+               << std::endl;
+            os << "Encryption parameters:" << std::endl;
+            os << "-->   scheme: " << scheme_string << std::endl;
+            os << "-->   poly_modulus_degree: " << n << std::endl;
+            os << "-->   Q_tilda size: Q( ";
 
             for (std::size_t i = 0; i < Q_mod_bit_sizes_.size() - 1; i++)
             {
-                std::cout << Q_mod_bit_sizes_[i] << " + ";
+                os << Q_mod_bit_sizes_[i] << " + ";
             }
-            std::cout << Q_mod_bit_sizes_.back();
-            std::cout << " ) + P( ";
+            os << Q_mod_bit_sizes_.back();
+            os << " ) + P( ";
             for (std::size_t i = 0; i < P_mod_bit_sizes_.size() - 1; i++)
             {
-                std::cout << P_mod_bit_sizes_[i] << " + ";
+                os << P_mod_bit_sizes_[i] << " + ";
             }
-            std::cout << P_mod_bit_sizes_.back();
-            std::cout << " ) bits" << std::endl;
+            os << P_mod_bit_sizes_.back();
+            os << " ) bits" << std::endl;
 
-            std::cout << std::endl;
+            os << std::endl;
         }
         else
         {
-            std::cout << "Parameters is not generated yet!" << std::endl;
+            os << "Parameters is not generated yet!" << std::endl;
         }
     }
 
-    void HEContextImpl<Scheme::CKKS>::save(std::ostream& os) const
+    void HEContextImpl<Scheme::CKKS>::save(std::ostream& os,
+                                           serialization_format format) const
     {
         if ((poly_modulus_degree_specified_) && (coeff_modulus_specified_))
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::context, scheme_,
+                context_id_);
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
             os.write((char*) &sec_level_, sizeof(sec_level_));
 
-            os.write((char*) &keyswitching_type_, sizeof(keyswitching_type_));
+            detail::write_keyswitching_byte(os);
 
             os.write((char*) &n, sizeof(n));
 
@@ -636,11 +672,17 @@ namespace heongpu
     {
         if ((!context_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::context, scheme_type::ckks);
+            detail::validate_loaded_context_identity(
+                context_id_, loaded_context_id, "HEContext");
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
             is.read((char*) &sec_level_, sizeof(sec_level_));
 
-            is.read((char*) &keyswitching_type_, sizeof(keyswitching_type_));
+            detail::read_keyswitching_byte(is, "HEContext");
 
             is.read((char*) &n, sizeof(n));
 
@@ -694,11 +736,62 @@ namespace heongpu
             context_generated_ = false;
 
             this->generate();
+
+            if (loaded_context_id != 0 && loaded_context_id != context_id_)
+            {
+                throw SerializationError(
+                    "Corrupted HEContext binary! The parameters "
+                    "do not match the context identity stored "
+                    "with them.");
+            }
         }
         else
         {
             throw std::runtime_error("Context has been already exist!");
         }
+    }
+
+    std::string HEContextImpl<Scheme::CKKS>::to_string() const
+    {
+        if (!context_generated_)
+        {
+            return "HEContext<CKKS>(not generated)";
+        }
+        std::ostringstream stream;
+        auto bits = [&](const std::vector<int>& sizes)
+        {
+            for (std::size_t i = 0; i < sizes.size(); i++)
+            {
+                stream << (i == 0 ? "" : "+") << sizes[i];
+            }
+        };
+        stream << "HEContext<CKKS>(N=" << n << ", Q=";
+        bits(Q_mod_bit_sizes_);
+        stream << " bits, P=";
+        bits(P_mod_bit_sizes_);
+        stream << " bits, security=" << detail::name(sec_level_);
+        if (rescale_mode_ != rescale_mode::manual)
+        {
+            stream << ", rescale=" << detail::name(rescale_mode_);
+        }
+        stream << ", id=0x" << std::hex << context_id_ << ")";
+        return stream.str();
+    }
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContextImpl<Scheme::CKKS>& object)
+    {
+        return os << object.to_string();
+    }
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContext<Scheme::CKKS>& context)
+    {
+        if (!context)
+        {
+            return os << "HEContext<CKKS>(null)";
+        }
+        return os << *context;
     }
 
     template class HEContextImpl<Scheme::CKKS>;

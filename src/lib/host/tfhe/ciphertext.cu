@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -13,7 +14,8 @@ namespace heongpu
     {
         if (!context)
         {
-            throw std::invalid_argument("HEContext is not set!");
+            throw ParameterError("HEContext is not set! Pass a context "
+                                 "created with GenHEContext.");
         }
 
         n_ = context->n_;
@@ -25,7 +27,7 @@ namespace heongpu
 
     void Ciphertext<Scheme::TFHE>::store_in_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -35,11 +37,13 @@ namespace heongpu
             {
                 a_device_location_ =
                     DeviceVector<int32_t>(a_host_location_, stream);
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
                 a_host_location_.resize(0);
                 a_host_location_.shrink_to_fit();
 
                 b_device_location_ =
                     DeviceVector<int32_t>(b_host_location_, stream);
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
                 b_host_location_.resize(0);
                 b_host_location_.shrink_to_fit();
             }
@@ -48,35 +52,36 @@ namespace heongpu
                 // pass
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Ciphertext<Scheme::TFHE>::store_in_host(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             if (ciphertext_generated_)
             {
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(this->stream()));
                 a_host_location_ =
                     HostVector<int32_t>(a_device_location_.size());
-                cudaMemcpyAsync(a_host_location_.data(),
-                                a_device_location_.data(),
-                                a_device_location_.size() * sizeof(int32_t),
-                                cudaMemcpyDeviceToHost, stream);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
+                HEONGPU_CUDA_CHECK(cudaMemcpyAsync(
+                    a_host_location_.data(), a_device_location_.data(),
+                    a_device_location_.size() * sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
 
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
                 a_device_location_.resize(0, stream);
                 a_device_location_.shrink_to_fit(stream);
 
                 b_host_location_ =
                     HostVector<int32_t>(b_device_location_.size());
-                cudaMemcpyAsync(b_host_location_.data(),
-                                b_device_location_.data(),
-                                b_device_location_.size() * sizeof(int32_t),
-                                cudaMemcpyDeviceToHost, stream);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
+                HEONGPU_CUDA_CHECK(cudaMemcpyAsync(
+                    b_host_location_.data(), b_device_location_.data(),
+                    b_device_location_.size() * sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
 
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
                 b_device_location_.resize(0, stream);
                 b_device_location_.shrink_to_fit(stream);
             }
@@ -85,7 +90,7 @@ namespace heongpu
                 // pass
             }
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -95,7 +100,7 @@ namespace heongpu
 
     void Ciphertext<Scheme::TFHE>::copy_to_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -105,22 +110,24 @@ namespace heongpu
             {
                 a_device_location_ =
                     DeviceVector<int32_t>(a_host_location_, stream);
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
 
                 b_device_location_ =
                     DeviceVector<int32_t>(b_host_location_, stream);
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
             }
             else
             {
                 // pass
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Ciphertext<Scheme::TFHE>::remove_from_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             a_device_location_.resize(0, stream);
             a_device_location_.shrink_to_fit(stream);
@@ -128,7 +135,7 @@ namespace heongpu
             b_device_location_.resize(0, stream);
             b_device_location_.shrink_to_fit(stream);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -138,7 +145,7 @@ namespace heongpu
 
     void Ciphertext<Scheme::TFHE>::remove_from_host()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -150,7 +157,7 @@ namespace heongpu
             b_host_location_.resize(0);
             b_host_location_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 

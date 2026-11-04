@@ -14,12 +14,75 @@ Key settings include:
 
 * **Polynomial Degree**: ``MAX_POLY_DEGREE`` (default: 65536) and ``MIN_POLY_DEGREE`` (default: 4096) define the supported range for polynomial degrees.
 * **Modulus Bit-Length**: These constants specify the valid bit-lengths for user-defined and general modulus values, ensuring cryptographic security.
-* **Galois Key Capability**: ``MAX_SHIFT`` (default: 8) controls the maximum rotation capability for default Galois key generation. If your application requires more rotation steps, this value must be increased.
-* **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 90% of the available VRAM and can grow to 95%, while the pinned host memory pool starts at a fixed 100 MB and can grow to 40% of the available RAM. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
+* **Galois Key Capability**: ``MAX_SHIFT`` (default: 8) sets the rotation range of the default Galois keys, ``Galoiskey(context)``: the steps 1, 2, 4, ..., 2^(MAX_SHIFT - 1) and their negatives. To use another range without rebuilding the library, construct the key with ``Galoiskey(context, max_shift)``, which generates the steps up to 2^max_shift.
+* **Memory Pool Sizes**: The initial and maximum sizes for the device (GPU) and host (CPU) memory pools are defined as percentages of available system memory. By default, the GPU pool is initialized to 50% of the available VRAM and can grow to 95%, while the pinned host memory pool starts at a fixed 100 MB and can grow to 40% of the available RAM. These values can be adjusted for systems with different memory capacities or for applications with particularly large memory footprints.
 
-These defaults assume a discrete GPU with its own VRAM. On a GPU that shares its memory with the system, such as an integrated part or an APU, the runtime reports the machine's memory as device memory (``hipMemGetInfo`` in a ROCm build), so a pool expressed as a fraction of the available device memory reserves that fraction of the whole machine. A 90% initial device pool on an otherwise idle machine with 72 GB of shared memory therefore asks for roughly 65 GB before a single ciphertext exists, leaving little for anything else, and both context creation and memory-heavy work have been observed to slow down markedly on such a part.
+These defaults assume a discrete GPU with its own VRAM. On a GPU that shares its memory with the system, such as an integrated part or an APU, the runtime reports the machine's memory as device memory (``hipMemGetInfo`` in a ROCm build), so a pool expressed as a fraction of the available device memory reserves that fraction of the whole machine. A 50% initial device pool on an otherwise idle machine with 72 GB of shared memory therefore asks for roughly 36 GB before a single ciphertext exists, leaving that much less for everything else.
 
-On such a system, size the initial device pool for what the application actually needs, as a small fraction of memory or as a fixed size of a gigabyte or two, rather than leaving it at the discrete-card default. The setting is per application and needs no rebuild: fill in ``initial_device_fraction`` or ``initial_device_bytes`` on a ``MemoryPoolConfig`` and pass it to ``context->generate()``. ``example/basic/3_basic_memorypool_config.cpp`` shows the mechanism, though the sizes it passes are themselves discrete-card sizes. The compiled defaults are unchanged and remain the right choice for a discrete card, where 90% of dedicated VRAM is a cheap reservation that nothing else on the system competes for.
+On such a system, size the initial device pool for what the application actually needs, as a small fraction of memory or as a fixed size of a gigabyte or two, rather than leaving it at the discrete-card default. The setting is per application and needs no rebuild: fill in ``initial_device_fraction`` or ``initial_device_bytes`` on a ``MemoryPoolConfig`` and pass it to ``context->generate()``. ``example/basic/3_basic_memorypool_config.cpp`` shows the mechanism, though the sizes it passes are themselves discrete-card sizes. The compiled defaults remain the right choice for a discrete card, where reserving half of the dedicated VRAM is a cheap reservation that nothing else on the system competes for.
+
+Process-Wide State
+------------------
+
+HEonGPU keeps some state for the whole process. This matters when it is embedded into a larger application:
+
+* **Memory pool**: One pool per process, created by the first ``generate()``. The ``MemoryPoolConfig`` of that call sets its sizes; ``use_memory_pool`` of the most recent call decides whether new allocations use it.
+* **Random number generator**: One generator per process, seeded by the first ``generate()``.
+* **CUDA kernel stack size**: HEonGPU's kernels need at least 2048 bytes per thread. ``generate()`` raises a lower ``cudaLimitStackSize`` and keeps a higher one. With ``MemoryPoolConfig::raise_kernel_stack_size = false``, it does not change the limit and throws ``StateError`` if the limit is too low.
+* **RMM default resource**: Not changed. HEonGPU allocates from its own resource. With ``MemoryPoolConfig::set_as_rmm_default = true``, HEonGPU's pool also becomes the process-wide RMM default; the previous default is restored when a later context turns it off, and at exit.
+
+HEonGPU does not change other CUDA settings and does not select the CUDA device; it uses the current device of the calling thread.
+
+HEonGPU writes no output on its own. Only ``print_parameters()`` and ``MemoryPool::print_memory_pool_status()`` print, when called, to the stream they are given (``std::cout`` by default); errors are reported with exceptions. RMM, which HEonGPU uses for device memory, can log to ``stderr``, for example when an allocation fails. Its log level is set with ``rmm::default_logger().set_level(rapids_logger::level_enum::off)`` (from ``<rmm/logger.hpp>``) or another level.
+
+With the static library, every shared library or plugin that embeds HEonGPU has its own copy of this state. With the shared library (``HEonGPU_BUILD_SHARED=ON``), the whole process shares one.
+
+The first ``generate()`` sets this state up. An application can also control it explicitly:
+
+.. code-block:: cpp
+
+    heongpu::initialize(config);   // optional; generate() does it otherwise
+    // ... use HEonGPU ...
+    heongpu::shutdown();           // releases the memory pool and the generator
+    heongpu::initialize(other);    // sets it up again, with another configuration
+
+``shutdown()`` requires all HEonGPU objects (contexts, keys, plaintexts, ciphertexts, encoders, encryptors, decryptors and operators) to be destroyed; otherwise it throws ``StateError`` and releases nothing. It also restores the RMM default resource if ``set_as_rmm_default`` replaced it.
+
+Versioning and Compatibility
+----------------------------
+
+HEonGPU follows `semantic versioning <https://semver.org/>`_:
+
+* **Major versions** (2.0, 3.0, ...) can change or remove APIs.
+* **Minor versions** (1.4, 1.5, ...) add features without breaking code that compiles against the previous minor version. They can change the ABI, so rebuild code that uses HEonGPU; the shared library is versioned accordingly (``libheongpu.so.1.4``).
+* **Patch versions** (1.4.1, ...) fix bugs without changing the API or the ABI.
+
+APIs that will be removed are first marked ``[[deprecated]]``, with the replacement in the warning, for at least one minor version, and removed in the next major version.
+
+Removed in 2.0, with the replacements to use:
+
+* CKKS ``rotate_rows``, ``rotate_rows_inplace`` and ``rotate_rows_hoisted``: ``rotate``, ``rotate_inplace`` and ``rotate_hoisted``. CKKS slots are not split into rows; BFV keeps ``rotate_rows`` and ``rotate_columns``.
+* The CKKS bootstrapping functions that took the switch keys by pointer (``regular_bootstrapping``, ``slim_bootstrapping``, ``bit_bootstrapping`` and the gates such as ``AND_bootstrapping``): the overloads with ``CKKSBootstrappingKeys``.
+* ``bootstrapping_key_indexs``: ``bootstrapping_key_indices``.
+* ``get_seed``, ``set_seed``, ``get_offset`` and ``set_offset`` of the encryptors, decryptors and key generators, which had no effect: nothing; the random numbers come from ``RandomNumberGenerator``.
+* The upper case values ``storage_type::HOST``/``DEVICE``, ``encoding::SLOT``/``COEFFICIENT``, ``arithmetic_bootstrapping_type::NONE``/``REGULAR_BOOTSTRAPPING``/``SLIM_BOOTSTRAPPING`` and ``logic_bootstrapping_type::NONE``/``BIT_BOOTSTRAPPING``/``GATE_BOOTSTRAPPING``: the lower case values (``storage_type::device``, ``encoding::slot``, ``arithmetic_bootstrapping_type::regular``, ...).
+* ``serialization_format::v1``: ``save`` writes the format version 2 only. ``load`` still reads data of the format version 1.
+* ``keyswitching_type``: nothing; every context uses hybrid key switching, and ``to_string()`` of a context no longer shows it.
+
+The inputs of the operations, of encoding, encryption, decryption, key generation and multiparty computation are taken by ``const`` reference. Code that calls them compiles unchanged, and the result of one call can be passed directly to the next. An operation never changes its inputs: an input in host memory is read from a temporary copy on the device and stays in host memory, also with ``set_initial_location(false)``, which now only applies to the object an ``*_inplace`` operation changes. Code that relied on ``set_initial_location(false)`` to move inputs to the device moves them with ``store_in_device()`` instead. An encryptor or decryptor created with a key in host memory copies the key to the device and leaves the key in host memory.
+
+Serialized data stays readable: HEonGPU 2.0 reads the data written by every 1.x version, and HEonGPU 1.3 and later read the data written by 2.0.
+
+Supported toolchain: CUDA 12.8 or newer, a C++20 compiler (tested with GCC 11.4) and CMake 4.0 or newer.
+
+**Thread safety**
+
+* A generated context is not changed afterwards and can be shared by threads.
+* Keys and operators can be shared by threads that run operations on their own ciphertexts and plaintexts and their own CUDA streams, as the multi-stream examples do.
+* Operations do not change their inputs, so threads can share them. An object that an operation writes, or that is moved between host and device memory, must not be used by another thread at the same time.
+* An ``HESession`` and its copies can be used by several threads. A rotation by a step that has no key yet generates the key while the other rotations of the session wait; the key returned by ``galois_key()`` must not be used while other threads rotate with the session.
+* The memory pool is thread-safe. Call ``heongpu::initialize()`` and ``heongpu::shutdown()`` while no other thread uses HEonGPU.
+* Key generation, encryption and multiparty computation can run from several threads. They draw from one process-wide random number generator. It takes one request at a time on the host but does not wait for the GPU, so the GPU work of requests on different CUDA streams runs concurrently. The numbers of a seed, as the common polynomials of multiparty computation, are drawn without other threads drawing in between and are the same on every GPU and every kind of CUDA stream.
 
 Multiparty Computation (MPC)
 ----------------------------
@@ -54,6 +117,16 @@ To integrate HEonGPU into your own CMake project, first ensure the library is in
 
     # Enable separable compilation for CUDA, which is often required
     set_target_properties(<your-target> PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+This applies to the default static library (``libheongpu.a``), which leaves the CUDA device link to your project. HEonGPU can also be built as a shared library with ``-D HEonGPU_BUILD_SHARED=ON`` (``libheongpu.so``). The shared library does its own device link, so your project does not need to enable CUDA or separable compilation, and all libraries in a process that use it share one HEonGPU, including its memory pool:
+
+.. code-block:: cmake
+
+    project(<your-project> LANGUAGES CXX)
+    find_package(HEonGPU REQUIRED)
+    target_link_libraries(<your-target> PRIVATE HEonGPU::heongpu)
+
+The shared library is versioned with the major and minor version (for example ``libheongpu.so.1.4``), because its ABI can change between minor versions. Its kernels are internal and cannot be launched from outside the library.
 
 Against a HEonGPU built with ``USE_HIP=ON``, the same project uses the HIP language and the HIP runtime instead. Sources that include the HEonGPU headers must be compiled as HIP, because the header chain carries device code -- the same reason those headers require nvcc in a CUDA build.
 

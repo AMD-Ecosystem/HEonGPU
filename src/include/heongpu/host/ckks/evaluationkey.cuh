@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -6,6 +7,7 @@
 #ifndef HEONGPU_CKKS_EVALUATIONKEY_H
 #define HEONGPU_CKKS_EVALUATIONKEY_H
 
+#include <optional>
 #include <heongpu/host/ckks/context.cuh>
 #include <heongpu/kernel/keygeneration.cuh>
 
@@ -67,7 +69,7 @@ namespace heongpu
          */
         bool is_on_device() const
         {
-            return (storage_type_ == storage_type::DEVICE);
+            return (storage_type_ == storage_type::device);
         }
 
         /**
@@ -76,6 +78,7 @@ namespace heongpu
          * @return Data64* Pointer to the relinearization key data.
          */
         Data64* data();
+        const Data64* data() const;
 
         /**
          * @brief Returns a pointer to the specific part of the relinearization
@@ -86,6 +89,7 @@ namespace heongpu
          * key data.
          */
         Data64* data(size_t i);
+        const Data64* data(size_t i) const;
 
         /**
          * @brief Copy constructor for creating a new Relinkey object by copying
@@ -98,8 +102,8 @@ namespace heongpu
          * @param copy The source Relinkey object to copy from.
          */
         Relinkey(const Relinkey& copy)
-            : context_(copy.context_), scheme_(copy.scheme_),
-              key_type(copy.key_type), ring_size(copy.ring_size),
+            : context_(copy.context_), context_id_(copy.context_id_),
+              scheme_(copy.scheme_), ring_size(copy.ring_size),
               Q_prime_size_(copy.Q_prime_size_), Q_size_(copy.Q_size_),
               d_(copy.d_), d_tilda_(copy.d_tilda_), r_prime_(copy.r_prime_),
               storage_type_(copy.storage_type_),
@@ -107,7 +111,7 @@ namespace heongpu
               relinkey_size_leveled_(copy.relinkey_size_leveled_),
               relin_key_generated_(copy.relin_key_generated_)
         {
-            if (copy.storage_type_ == storage_type::DEVICE)
+            if (copy.storage_type_ == storage_type::device)
             {
                 if (copy.relinkey_size_leveled_.size() == 0)
                 {
@@ -172,8 +176,8 @@ namespace heongpu
          */
         Relinkey(Relinkey&& assign) noexcept
             : context_(std::move(assign.context_)),
+              context_id_(assign.context_id_),
               scheme_(std::move(assign.scheme_)),
-              key_type(std::move(assign.key_type)),
               ring_size(std::move(assign.ring_size)),
               Q_prime_size_(std::move(assign.Q_prime_size_)),
               Q_size_(std::move(assign.Q_size_)), d_(std::move(assign.d_)),
@@ -184,7 +188,7 @@ namespace heongpu
               relinkey_size_leveled_(std::move(assign.relinkey_size_leveled_)),
               relin_key_generated_(std::move(assign.relin_key_generated_))
         {
-            if (assign.storage_type_ == storage_type::DEVICE)
+            if (assign.storage_type_ == storage_type::device)
             {
                 if (assign.relinkey_size_leveled_.size() == 0)
                 {
@@ -238,8 +242,8 @@ namespace heongpu
             if (this != &copy)
             {
                 context_ = copy.context_;
+                context_id_ = copy.context_id_;
                 scheme_ = copy.scheme_;
-                key_type = copy.key_type;
                 ring_size = copy.ring_size;
                 Q_prime_size_ = copy.Q_prime_size_;
                 Q_size_ = copy.Q_size_;
@@ -251,7 +255,7 @@ namespace heongpu
                 relinkey_size_leveled_ = copy.relinkey_size_leveled_;
                 relin_key_generated_ = copy.relin_key_generated_;
 
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     if (copy.relinkey_size_leveled_.size() == 0)
                     {
@@ -325,8 +329,8 @@ namespace heongpu
             if (this != &assign)
             {
                 context_ = std::move(assign.context_);
+                context_id_ = assign.context_id_;
                 scheme_ = std::move(assign.scheme_);
-                key_type = std::move(assign.key_type);
                 ring_size = std::move(assign.ring_size);
                 Q_prime_size_ = std::move(assign.Q_prime_size_);
                 Q_size_ = std::move(assign.Q_size_);
@@ -339,7 +343,7 @@ namespace heongpu
                     std::move(assign.relinkey_size_leveled_);
                 relin_key_generated_ = std::move(assign.relin_key_generated_);
 
-                if (assign.storage_type_ == storage_type::DEVICE)
+                if (assign.storage_type_ == storage_type::device)
                 {
                     if (assign.relinkey_size_leveled_.size() == 0)
                     {
@@ -385,7 +389,8 @@ namespace heongpu
          */
         Relinkey() = default;
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -396,8 +401,26 @@ namespace heongpu
 
       private:
         HEContext<Scheme::CKKS> context_;
+        // Context identity read by load(); used when context_ is not set.
+        std::uint64_t context_id_ = 0;
+
+        std::uint64_t serialized_context_id() const
+        {
+            return context_ ? context_->context_id() : context_id_;
+        }
+
+        void validate_context(const HEContext<Scheme::CKKS>& context) const
+        {
+            validate_context_identity(serialized_context_id(), context,
+                                      "Relinkey");
+            if (relin_key_generated_ && context && context->context_generated_)
+            {
+                validate_key_digit_count(d_, context->d_leveled->operator[](0),
+                                         "Relinkey");
+            }
+        }
+
         scheme_type scheme_;
-        keyswitching_type key_type;
 
         int ring_size;
         int Q_prime_size_;
@@ -421,7 +444,7 @@ namespace heongpu
         HostVector<Data64> host_location_;
         std::vector<HostVector<Data64>> host_location_leveled_;
 
-        int memory_size();
+        int memory_size() const;
         void memory_clear(cudaStream_t stream);
         void memory_set(DeviceVector<Data64>&& new_device_vector);
         void memory_set(DeviceVector<Data64>&& new_device_vector, int i);
@@ -490,14 +513,16 @@ namespace heongpu
         template <Scheme S> friend class HEArithmeticOperator;
         template <Scheme S> friend class HELogicOperator;
         template <Scheme S> friend class HEMultiPartyManager;
+        template <Scheme S> friend class HESession;
 
       public:
         /**
          * @brief Constructs a new Galoiskey object with default settings that
          * allow rotations in the range (-255, 255).
          *
-         * This range can be increased by modifying the definition in
-         * kernel/defines.h (MAX_SHIFT).
+         * The range is set by MAX_SHIFT in kernel/defines.h. Use
+         * Galoiskey(context, max_shift) to choose another range without
+         * rebuilding the library.
          *
          * @param context Reference to the Parameters object that sets the
          * encryption parameters.
@@ -556,7 +581,7 @@ namespace heongpu
          */
         bool is_on_device() const
         {
-            return (storage_type_ == storage_type::DEVICE);
+            return (storage_type_ == storage_type::device);
         }
 
         /**
@@ -567,6 +592,7 @@ namespace heongpu
          * @return Data64* Pointer to the specified part of the Galois key data.
          */
         Data64* data(size_t i);
+        const Data64* data(size_t i) const;
 
         /**
          * @brief Returns a pointer to the Galois key data for conjugation.(for
@@ -575,6 +601,7 @@ namespace heongpu
          * @return Data64* Pointer to the Galois key data for column rotation.
          */
         Data64* c_data();
+        const Data64* c_data() const;
 
         /**
          * @brief Copy constructor for creating a new Galoiskey object by
@@ -587,19 +614,20 @@ namespace heongpu
          * @param copy The source Galoiskey object to copy from.
          */
         Galoiskey(const Galoiskey& copy)
-            : context_(copy.context_), scheme_(copy.scheme_),
-              key_type(copy.key_type), ring_size(copy.ring_size),
+            : context_(copy.context_), context_id_(copy.context_id_),
+              scheme_(copy.scheme_), ring_size(copy.ring_size),
               Q_prime_size_(copy.Q_prime_size_), Q_size_(copy.Q_size_),
               d_(copy.d_), customized(copy.customized),
               group_order_(copy.group_order_),
               storage_type_(copy.storage_type_),
               galoiskey_size_(copy.galoiskey_size_),
               custom_galois_elt(copy.custom_galois_elt),
+              max_shift_(copy.max_shift_), max_log_slot_(copy.max_log_slot_),
               galois_elt(copy.galois_elt),
               galois_elt_zero(copy.galois_elt_zero),
               galois_key_generated_(copy.galois_key_generated_)
         {
-            if (copy.storage_type_ == storage_type::DEVICE)
+            if (copy.storage_type_ == storage_type::device)
             {
                 for (const auto& [key, value] : copy.device_location_)
                 {
@@ -645,8 +673,8 @@ namespace heongpu
          */
         Galoiskey(Galoiskey&& assign) noexcept
             : context_(std::move(assign.context_)),
+              context_id_(assign.context_id_),
               scheme_(std::move(assign.scheme_)),
-              key_type(std::move(assign.key_type)),
               ring_size(std::move(assign.ring_size)),
               Q_prime_size_(std::move(assign.Q_prime_size_)),
               Q_size_(std::move(assign.Q_size_)), d_(std::move(assign.d_)),
@@ -655,11 +683,13 @@ namespace heongpu
               storage_type_(std::move(assign.storage_type_)),
               galoiskey_size_(std::move(assign.galoiskey_size_)),
               custom_galois_elt(std::move(assign.custom_galois_elt)),
+              max_shift_(assign.max_shift_),
+              max_log_slot_(assign.max_log_slot_),
               galois_elt(std::move(assign.galois_elt)),
               galois_elt_zero(std::move(assign.galois_elt_zero)),
               galois_key_generated_(std::move(assign.galois_key_generated_))
         {
-            if (assign.storage_type_ == storage_type::DEVICE)
+            if (assign.storage_type_ == storage_type::device)
             {
                 for (const auto& [key, value] : assign.device_location_)
                 {
@@ -699,8 +729,8 @@ namespace heongpu
             if (this != &copy)
             {
                 context_ = copy.context_;
+                context_id_ = copy.context_id_;
                 scheme_ = copy.scheme_;
-                key_type = copy.key_type;
                 ring_size = copy.ring_size;
                 Q_prime_size_ = copy.Q_prime_size_;
                 Q_size_ = copy.Q_size_;
@@ -710,11 +740,13 @@ namespace heongpu
                 storage_type_ = copy.storage_type_;
                 galoiskey_size_ = copy.galoiskey_size_;
                 custom_galois_elt = copy.custom_galois_elt;
+                max_shift_ = copy.max_shift_;
+                max_log_slot_ = copy.max_log_slot_;
                 galois_elt = copy.galois_elt;
                 galois_elt_zero = copy.galois_elt_zero;
                 galois_key_generated_ = copy.galois_key_generated_;
 
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     for (const auto& [key, value] : copy.device_location_)
                     {
@@ -768,8 +800,8 @@ namespace heongpu
             if (this != &assign)
             {
                 context_ = std::move(assign.context_);
+                context_id_ = assign.context_id_;
                 scheme_ = std::move(assign.scheme_);
-                key_type = std::move(assign.key_type);
                 ring_size = std::move(assign.ring_size);
                 Q_prime_size_ = std::move(assign.Q_prime_size_);
                 Q_size_ = std::move(assign.Q_size_);
@@ -779,11 +811,13 @@ namespace heongpu
                 storage_type_ = std::move(assign.storage_type_);
                 galoiskey_size_ = std::move(assign.galoiskey_size_);
                 custom_galois_elt = std::move(assign.custom_galois_elt);
+                max_shift_ = assign.max_shift_;
+                max_log_slot_ = assign.max_log_slot_;
                 galois_elt = std::move(assign.galois_elt);
                 galois_elt_zero = std::move(assign.galois_elt_zero);
                 galois_key_generated_ = std::move(assign.galois_key_generated_);
 
-                if (assign.storage_type_ == storage_type::DEVICE)
+                if (assign.storage_type_ == storage_type::device)
                 {
                     for (const auto& [key, value] : assign.device_location_)
                     {
@@ -818,7 +852,8 @@ namespace heongpu
          */
         Galoiskey() = default;
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -829,8 +864,28 @@ namespace heongpu
 
       private:
         HEContext<Scheme::CKKS> context_;
+        // Context identity read by load(); used when context_ is not set.
+        std::uint64_t context_id_ = 0;
+
+        std::uint64_t serialized_context_id() const
+        {
+            return context_ ? context_->context_id() : context_id_;
+        }
+
+        void validate_context(const HEContext<Scheme::CKKS>& context) const
+        {
+            validate_context_identity(serialized_context_id(), context,
+                                      "Galoiskey");
+            if (galois_key_generated_ && context && context->context_generated_)
+            {
+                validate_key_digit_count(d_, context->d_leveled->operator[](0),
+                                         "Galoiskey");
+            }
+        }
+
+        void set_rotation_limits();
+
         scheme_type scheme_;
-        keyswitching_type key_type;
 
         int ring_size;
 
@@ -845,12 +900,14 @@ namespace heongpu
         storage_type storage_type_;
         Data64 galoiskey_size_;
         std::vector<uint32_t> custom_galois_elt;
-        int max_shift_;
-        int max_log_slot_;
+        // Rotations without their own key are built from the keys for the
+        // steps 1, 2, 4, ..., 2^max_shift_ (see set_rotation_limits()).
+        int max_shift_ = -1;
+        int max_log_slot_ = 0;
 
         bool galois_key_generated_ = false;
 
-        // for rotate_rows
+        // for rotate
         std::unordered_map<int, int> galois_elt;
         std::unordered_map<int, DeviceVector<Data64>> device_location_;
         std::unordered_map<int, HostVector<Data64>> host_location_;
@@ -951,7 +1008,7 @@ namespace heongpu
          */
         bool is_on_device() const
         {
-            return (storage_type_ == storage_type::DEVICE);
+            return (storage_type_ == storage_type::device);
         }
 
         /**
@@ -960,6 +1017,7 @@ namespace heongpu
          * @return Data64* Pointer to the switch key data.
          */
         Data64* data();
+        const Data64* data() const;
 
         Switchkey() = default;
         Switchkey(const Switchkey& copy) = default;
@@ -967,7 +1025,8 @@ namespace heongpu
         Switchkey& operator=(const Switchkey& assign) = default;
         Switchkey& operator=(Switchkey&& assign) = default;
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -978,8 +1037,26 @@ namespace heongpu
 
       private:
         HEContext<Scheme::CKKS> context_;
+        // Context identity read by load(); used when context_ is not set.
+        std::uint64_t context_id_ = 0;
+
+        std::uint64_t serialized_context_id() const
+        {
+            return context_ ? context_->context_id() : context_id_;
+        }
+
+        void validate_context(const HEContext<Scheme::CKKS>& context) const
+        {
+            validate_context_identity(serialized_context_id(), context,
+                                      "Switchkey");
+            if (switch_key_generated_ && context && context->context_generated_)
+            {
+                validate_key_digit_count(d_, context->d_leveled->operator[](0),
+                                         "Switchkey");
+            }
+        }
+
         scheme_type scheme_;
-        keyswitching_type key_type;
 
         int ring_size;
 
@@ -996,7 +1073,7 @@ namespace heongpu
         DeviceVector<Data64> device_location_;
         HostVector<Data64> host_location_;
 
-        int memory_size();
+        int memory_size() const;
         void memory_clear(cudaStream_t stream);
         void memory_set(DeviceVector<Data64>&& new_device_vector);
         void memory_set(DeviceVector<Data64>&& new_device_vector, int i);
@@ -1004,6 +1081,19 @@ namespace heongpu
         void copy_to_device(cudaStream_t stream);
         void remove_from_device(cudaStream_t stream);
         void remove_from_host();
+    };
+
+    /**
+     * @brief The keys CKKS bootstrapping uses, as HEKeyGenerator::
+     * bootstrapping_keys generates them. The switch keys between the secret
+     * key and a sparse secret key are present when bootstrapping uses one.
+     */
+    struct CKKSBootstrappingKeys
+    {
+        Relinkey<Scheme::CKKS> relin_key;
+        Galoiskey<Scheme::CKKS> galois_key;
+        std::optional<Switchkey<Scheme::CKKS>> dense_to_sparse;
+        std::optional<Switchkey<Scheme::CKKS>> sparse_to_dense;
     };
 
 } // namespace heongpu

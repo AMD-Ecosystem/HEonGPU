@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -70,7 +71,7 @@ namespace heongpu
          */
         bool is_on_device() const noexcept
         {
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 return true;
             }
@@ -86,6 +87,7 @@ namespace heongpu
          * @return Data64* Pointer to the plaintext data.
          */
         Data64* data();
+        const Data64* data() const;
 
         /**
          * @brief Returns the size of the plaintext.
@@ -108,15 +110,22 @@ namespace heongpu
          * Initializes an empty Plaintext object. All members will have their
          * default values.
          */
+        /**
+         * @brief Returns a one line description, for example for logs and
+         * error reports. Also written by operator<<.
+         */
+        std::string to_string() const;
+
         Plaintext() = default;
 
         Plaintext(const Plaintext& copy)
             : scheme_(copy.scheme_), plain_size_(copy.plain_size_),
               in_ntt_domain_(copy.in_ntt_domain_),
               storage_type_(copy.storage_type_),
-              plaintext_generated_(copy.plaintext_generated_)
+              plaintext_generated_(copy.plaintext_generated_),
+              context_id_(copy.context_id_)
         {
-            if (copy.storage_type_ == storage_type::DEVICE)
+            if (copy.storage_type_ == storage_type::device)
             {
                 device_locations_.resize(copy.device_locations_.size(),
                                          copy.device_locations_.stream());
@@ -141,6 +150,7 @@ namespace heongpu
               in_ntt_domain_(std::move(assign.in_ntt_domain_)),
               storage_type_(std::move(assign.storage_type_)),
               plaintext_generated_(std::move(assign.plaintext_generated_)),
+              context_id_(assign.context_id_),
               device_locations_(std::move(assign.device_locations_)),
               host_locations_(std::move(assign.host_locations_))
         {
@@ -155,8 +165,9 @@ namespace heongpu
                 in_ntt_domain_ = copy.in_ntt_domain_;
                 storage_type_ = copy.storage_type_;
                 plaintext_generated_ = copy.plaintext_generated_;
+                context_id_ = copy.context_id_;
 
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     device_locations_.resize(copy.device_locations_.size(),
                                              copy.device_locations_.stream());
@@ -187,6 +198,7 @@ namespace heongpu
                 in_ntt_domain_ = std::move(assign.in_ntt_domain_);
                 storage_type_ = std::move(assign.storage_type_);
                 plaintext_generated_ = std::move(assign.plaintext_generated_);
+                context_id_ = assign.context_id_;
 
                 device_locations_ = std::move(assign.device_locations_);
                 host_locations_ = std::move(assign.host_locations_);
@@ -194,7 +206,8 @@ namespace heongpu
             return *this;
         }
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -206,11 +219,13 @@ namespace heongpu
         storage_type storage_type_;
 
         bool plaintext_generated_ = false;
+        std::uint64_t context_id_ = 0;
 
         DeviceVector<Data64> device_locations_;
         HostVector<Data64> host_locations_;
 
-        int memory_size();
+        void validate_context(const HEContext<Scheme::BFV>& context) const;
+        int memory_size() const;
         void memory_clear(cudaStream_t stream);
         void memory_set(DeviceVector<Data64>&& new_device_vector);
 
@@ -218,6 +233,9 @@ namespace heongpu
         void remove_from_device(cudaStream_t stream);
         void remove_from_host();
     };
+
+    std::ostream& operator<<(std::ostream& os,
+                             const Plaintext<Scheme::BFV>& object);
 
 } // namespace heongpu
 #endif // HEONGPU_BFV_PLAINTEXT_H

@@ -1,9 +1,11 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
 #include <heongpu/host/tfhe/context.cuh>
+#include <heongpu/util/runtime.cuh>
 
 namespace heongpu
 {
@@ -16,9 +18,7 @@ namespace heongpu
         const MemoryPoolConfig& pool_config)
     {
         // Memory pool initialization
-        MemoryPool::instance().initialize(pool_config);
-        MemoryPool::instance().use_memory_pool(pool_config.use_memory_pool);
-        cudaDeviceSynchronize();
+        detail::initialize_memory_pool(pool_config);
 
         prime_ = Modulus64(1152921504606877697ULL);
         Data64 psi = 1689264667710614ULL;
@@ -77,6 +77,9 @@ namespace heongpu
             sum += static_cast<int64_t>(1) << shift;
         }
         int64_t result = sum * half_bg;
+        // Round the bits below the last digit instead of truncating them,
+        // which would bias every decomposition.
+        result += static_cast<int64_t>(1) << (32 - l * bg_bit - 1);
         return static_cast<int>(result);
     }
 

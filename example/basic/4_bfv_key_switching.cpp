@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -12,24 +13,24 @@ constexpr auto Scheme = heongpu::Scheme::BFV;
 
 int main(int argc, char* argv[])
 {
-    heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
-    // because of key size, only supports relinearization!
+    heongpu::HEParams<Scheme> params;
 
     size_t poly_modulus_degree = 16384;
-    context->set_poly_modulus_degree(poly_modulus_degree);
+    params.poly_modulus_degree = poly_modulus_degree;
 
-    context->set_coeff_modulus_default_values(
-        1); // Pair size = 2, that is why P size should be 2.
-    // Increasing the pair size improves performance(n >= 16384), but it also
-    // reduces the noise budget.
+    // One multiplication in a row; HEParams chooses the Q and P primes for
+    // it.
+    params.multiplicative_depth = 1;
 
-    // Alternative -> first input is Q (ciphertext modulus), second one
-    // is P and it determines to Q_tilda which is key modulus.(Q_tilda = QxP)
-    // context->set_coeff_modulus({50, 50, 50, 50, 50, 50}, {50, 50});
+    // Alternative -> the bit sizes of Q (ciphertext modulus) and P, which
+    // determine Q_tilda = QxP, the key modulus:
+    // params.coeff_modulus_bit_sizes = {50, 50, 50, 50, 50, 50};
+    // params.special_modulus_bit_sizes = {50, 50};
 
     int plain_modulus = 786433;
-    context->set_plain_modulus(plain_modulus);
+    params.plain_modulus = plain_modulus;
 
+    heongpu::HEContext<Scheme> context = params.make_context();
     context->generate();
     context->print_parameters();
 
@@ -68,7 +69,7 @@ int main(int argc, char* argv[])
     keygen.generate_switch_key(
         switch_key1_to_key2, secret_key2, secret_key,
         heongpu::ExecutionOptions().set_storage_type(
-            heongpu::storage_type::HOST)); // generate_switch_key is stored in
+            heongpu::storage_type::host)); // generate_switch_key is stored in
                                            // HOST
 
     heongpu::HEEncoder<Scheme> encoder(context);

@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -50,10 +51,10 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void NAND(Ciphertext<Scheme::TFHE>& input1,
-                           Ciphertext<Scheme::TFHE>& input2,
+        __host__ void NAND(const Ciphertext<Scheme::TFHE>& input1,
+                           const Ciphertext<Scheme::TFHE>& input2,
                            Ciphertext<Scheme::TFHE>& output,
-                           Bootstrappingkey<Scheme::TFHE>& boot_key,
+                           const Bootstrappingkey<Scheme::TFHE>& boot_key,
                            const ExecutionOptions& options = ExecutionOptions())
         {
             if (input1.shape_ != input2.shape_)
@@ -64,7 +65,9 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -87,11 +90,11 @@ namespace heongpu
                                                 temp_cipher =
                                                     generate_empty_ciphertext(
                                                         context_->n_,
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             NAND_pre_computation(
-                                                input1, input2, temp_cipher,
+                                                input1_, input2_, temp_cipher,
                                                 options.stream_);
 
                                             Ciphertext<Scheme::TFHE>
@@ -99,32 +102,33 @@ namespace heongpu
                                                     generate_empty_ciphertext(
                                                         (context_->k_ *
                                                          context_->N_),
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             bootstrapping(
                                                 temp_cipher, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                boot_key_, options.stream_);
 
                                             output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
+                                                input1_.shape_ * context_->n_,
                                                 options.stream_);
                                             output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
+                                                input1_.shape_,
+                                                options.stream_);
+                                            output.n_ = input1_.n_;
+                                            output.shape_ = input1_.shape_;
                                             output.variances_ =
-                                                input1.variances_;
+                                                input1_.variances_;
                                             output.alpha_min_ =
-                                                input1.alpha_min_;
+                                                input1_.alpha_min_;
                                             output.alpha_max_ =
-                                                input1.alpha_max_;
+                                                input1_.alpha_max_;
                                             output.ciphertext_generated_ = true;
                                             output.storage_type_ =
-                                                storage_type::DEVICE;
+                                                storage_type::device;
 
                                             key_switching(temp_cipher2, output,
-                                                          boot_key,
+                                                          boot_key_,
                                                           options.stream_);
                                         },
                                         options);
@@ -148,10 +152,10 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void AND(Ciphertext<Scheme::TFHE>& input1,
-                          Ciphertext<Scheme::TFHE>& input2,
+        __host__ void AND(const Ciphertext<Scheme::TFHE>& input1,
+                          const Ciphertext<Scheme::TFHE>& input2,
                           Ciphertext<Scheme::TFHE>& output,
-                          Bootstrappingkey<Scheme::TFHE>& boot_key,
+                          const Bootstrappingkey<Scheme::TFHE>& boot_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
             if (input1.shape_ != input2.shape_)
@@ -162,7 +166,9 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -185,11 +191,11 @@ namespace heongpu
                                                 temp_cipher =
                                                     generate_empty_ciphertext(
                                                         context_->n_,
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             AND_pre_computation(
-                                                input1, input2, temp_cipher,
+                                                input1_, input2_, temp_cipher,
                                                 options.stream_);
 
                                             Ciphertext<Scheme::TFHE>
@@ -197,32 +203,33 @@ namespace heongpu
                                                     generate_empty_ciphertext(
                                                         (context_->k_ *
                                                          context_->N_),
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             bootstrapping(
                                                 temp_cipher, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                boot_key_, options.stream_);
 
                                             output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
+                                                input1_.shape_ * context_->n_,
                                                 options.stream_);
                                             output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
+                                                input1_.shape_,
+                                                options.stream_);
+                                            output.n_ = input1_.n_;
+                                            output.shape_ = input1_.shape_;
                                             output.variances_ =
-                                                input1.variances_;
+                                                input1_.variances_;
                                             output.alpha_min_ =
-                                                input1.alpha_min_;
+                                                input1_.alpha_min_;
                                             output.alpha_max_ =
-                                                input1.alpha_max_;
+                                                input1_.alpha_max_;
                                             output.ciphertext_generated_ = true;
                                             output.storage_type_ =
-                                                storage_type::DEVICE;
+                                                storage_type::device;
 
                                             key_switching(temp_cipher2, output,
-                                                          boot_key,
+                                                          boot_key_,
                                                           options.stream_);
                                         },
                                         options);
@@ -246,10 +253,10 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void NOR(Ciphertext<Scheme::TFHE>& input1,
-                          Ciphertext<Scheme::TFHE>& input2,
+        __host__ void NOR(const Ciphertext<Scheme::TFHE>& input1,
+                          const Ciphertext<Scheme::TFHE>& input2,
                           Ciphertext<Scheme::TFHE>& output,
-                          Bootstrappingkey<Scheme::TFHE>& boot_key,
+                          const Bootstrappingkey<Scheme::TFHE>& boot_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
             if (input1.shape_ != input2.shape_)
@@ -260,7 +267,9 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -283,11 +292,11 @@ namespace heongpu
                                                 temp_cipher =
                                                     generate_empty_ciphertext(
                                                         context_->n_,
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             NOR_pre_computation(
-                                                input1, input2, temp_cipher,
+                                                input1_, input2_, temp_cipher,
                                                 options.stream_);
 
                                             Ciphertext<Scheme::TFHE>
@@ -295,32 +304,33 @@ namespace heongpu
                                                     generate_empty_ciphertext(
                                                         (context_->k_ *
                                                          context_->N_),
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             bootstrapping(
                                                 temp_cipher, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                boot_key_, options.stream_);
 
                                             output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
+                                                input1_.shape_ * context_->n_,
                                                 options.stream_);
                                             output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
+                                                input1_.shape_,
+                                                options.stream_);
+                                            output.n_ = input1_.n_;
+                                            output.shape_ = input1_.shape_;
                                             output.variances_ =
-                                                input1.variances_;
+                                                input1_.variances_;
                                             output.alpha_min_ =
-                                                input1.alpha_min_;
+                                                input1_.alpha_min_;
                                             output.alpha_max_ =
-                                                input1.alpha_max_;
+                                                input1_.alpha_max_;
                                             output.ciphertext_generated_ = true;
                                             output.storage_type_ =
-                                                storage_type::DEVICE;
+                                                storage_type::device;
 
                                             key_switching(temp_cipher2, output,
-                                                          boot_key,
+                                                          boot_key_,
                                                           options.stream_);
                                         },
                                         options);
@@ -344,10 +354,10 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void OR(Ciphertext<Scheme::TFHE>& input1,
-                         Ciphertext<Scheme::TFHE>& input2,
+        __host__ void OR(const Ciphertext<Scheme::TFHE>& input1,
+                         const Ciphertext<Scheme::TFHE>& input2,
                          Ciphertext<Scheme::TFHE>& output,
-                         Bootstrappingkey<Scheme::TFHE>& boot_key,
+                         const Bootstrappingkey<Scheme::TFHE>& boot_key,
                          const ExecutionOptions& options = ExecutionOptions())
         {
             if (input1.shape_ != input2.shape_)
@@ -358,7 +368,9 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -381,10 +393,10 @@ namespace heongpu
                                                 temp_cipher =
                                                     generate_empty_ciphertext(
                                                         context_->n_,
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
-                                            OR_pre_computation(input1, input2,
+                                            OR_pre_computation(input1_, input2_,
                                                                temp_cipher,
                                                                options.stream_);
 
@@ -393,32 +405,33 @@ namespace heongpu
                                                     generate_empty_ciphertext(
                                                         (context_->k_ *
                                                          context_->N_),
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             bootstrapping(
                                                 temp_cipher, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                boot_key_, options.stream_);
 
                                             output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
+                                                input1_.shape_ * context_->n_,
                                                 options.stream_);
                                             output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
+                                                input1_.shape_,
+                                                options.stream_);
+                                            output.n_ = input1_.n_;
+                                            output.shape_ = input1_.shape_;
                                             output.variances_ =
-                                                input1.variances_;
+                                                input1_.variances_;
                                             output.alpha_min_ =
-                                                input1.alpha_min_;
+                                                input1_.alpha_min_;
                                             output.alpha_max_ =
-                                                input1.alpha_max_;
+                                                input1_.alpha_max_;
                                             output.ciphertext_generated_ = true;
                                             output.storage_type_ =
-                                                storage_type::DEVICE;
+                                                storage_type::device;
 
                                             key_switching(temp_cipher2, output,
-                                                          boot_key,
+                                                          boot_key_,
                                                           options.stream_);
                                         },
                                         options);
@@ -442,10 +455,10 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void XNOR(Ciphertext<Scheme::TFHE>& input1,
-                           Ciphertext<Scheme::TFHE>& input2,
+        __host__ void XNOR(const Ciphertext<Scheme::TFHE>& input1,
+                           const Ciphertext<Scheme::TFHE>& input2,
                            Ciphertext<Scheme::TFHE>& output,
-                           Bootstrappingkey<Scheme::TFHE>& boot_key,
+                           const Bootstrappingkey<Scheme::TFHE>& boot_key,
                            const ExecutionOptions& options = ExecutionOptions())
         {
             if (input1.shape_ != input2.shape_)
@@ -456,7 +469,9 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -479,11 +494,11 @@ namespace heongpu
                                                 temp_cipher =
                                                     generate_empty_ciphertext(
                                                         context_->n_,
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             XNOR_pre_computation(
-                                                input1, input2, temp_cipher,
+                                                input1_, input2_, temp_cipher,
                                                 options.stream_);
 
                                             Ciphertext<Scheme::TFHE>
@@ -491,32 +506,33 @@ namespace heongpu
                                                     generate_empty_ciphertext(
                                                         (context_->k_ *
                                                          context_->N_),
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             bootstrapping(
                                                 temp_cipher, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                boot_key_, options.stream_);
 
                                             output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
+                                                input1_.shape_ * context_->n_,
                                                 options.stream_);
                                             output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
+                                                input1_.shape_,
+                                                options.stream_);
+                                            output.n_ = input1_.n_;
+                                            output.shape_ = input1_.shape_;
                                             output.variances_ =
-                                                input1.variances_;
+                                                input1_.variances_;
                                             output.alpha_min_ =
-                                                input1.alpha_min_;
+                                                input1_.alpha_min_;
                                             output.alpha_max_ =
-                                                input1.alpha_max_;
+                                                input1_.alpha_max_;
                                             output.ciphertext_generated_ = true;
                                             output.storage_type_ =
-                                                storage_type::DEVICE;
+                                                storage_type::device;
 
                                             key_switching(temp_cipher2, output,
-                                                          boot_key,
+                                                          boot_key_,
                                                           options.stream_);
                                         },
                                         options);
@@ -540,10 +556,10 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void XOR(Ciphertext<Scheme::TFHE>& input1,
-                          Ciphertext<Scheme::TFHE>& input2,
+        __host__ void XOR(const Ciphertext<Scheme::TFHE>& input1,
+                          const Ciphertext<Scheme::TFHE>& input2,
                           Ciphertext<Scheme::TFHE>& output,
-                          Bootstrappingkey<Scheme::TFHE>& boot_key,
+                          const Bootstrappingkey<Scheme::TFHE>& boot_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
             if (input1.shape_ != input2.shape_)
@@ -554,7 +570,9 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -577,11 +595,11 @@ namespace heongpu
                                                 temp_cipher =
                                                     generate_empty_ciphertext(
                                                         context_->n_,
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             XOR_pre_computation(
-                                                input1, input2, temp_cipher,
+                                                input1_, input2_, temp_cipher,
                                                 options.stream_);
 
                                             Ciphertext<Scheme::TFHE>
@@ -589,32 +607,33 @@ namespace heongpu
                                                     generate_empty_ciphertext(
                                                         (context_->k_ *
                                                          context_->N_),
-                                                        input1.shape_,
+                                                        input1_.shape_,
                                                         options.stream_);
 
                                             bootstrapping(
                                                 temp_cipher, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                boot_key_, options.stream_);
 
                                             output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
+                                                input1_.shape_ * context_->n_,
                                                 options.stream_);
                                             output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
+                                                input1_.shape_,
+                                                options.stream_);
+                                            output.n_ = input1_.n_;
+                                            output.shape_ = input1_.shape_;
                                             output.variances_ =
-                                                input1.variances_;
+                                                input1_.variances_;
                                             output.alpha_min_ =
-                                                input1.alpha_min_;
+                                                input1_.alpha_min_;
                                             output.alpha_max_ =
-                                                input1.alpha_max_;
+                                                input1_.alpha_max_;
                                             output.ciphertext_generated_ = true;
                                             output.storage_type_ =
-                                                storage_type::DEVICE;
+                                                storage_type::device;
 
                                             key_switching(temp_cipher2, output,
-                                                          boot_key,
+                                                          boot_key_,
                                                           options.stream_);
                                         },
                                         options);
@@ -637,13 +656,15 @@ namespace heongpu
          * @param output Output ciphertext after NOT operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void NOT(Ciphertext<Scheme::TFHE>& input1,
+        __host__ void NOT(const Ciphertext<Scheme::TFHE>& input1,
                           Ciphertext<Scheme::TFHE>& output,
                           const ExecutionOptions& options = ExecutionOptions())
         {
             if (!(input1.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
@@ -655,18 +676,18 @@ namespace heongpu
                         [&](Ciphertext<Scheme::TFHE>& output_)
                         {
                             output.a_device_location_.resize(
-                                input1.shape_ * context_->n_, options.stream_);
-                            output.b_device_location_.resize(input1.shape_,
+                                input1_.shape_ * context_->n_, options.stream_);
+                            output.b_device_location_.resize(input1_.shape_,
                                                              options.stream_);
-                            output.n_ = input1.n_;
-                            output.shape_ = input1.shape_;
-                            output.variances_ = input1.variances_;
-                            output.alpha_min_ = input1.alpha_min_;
-                            output.alpha_max_ = input1.alpha_max_;
+                            output.n_ = input1_.n_;
+                            output.shape_ = input1_.shape_;
+                            output.variances_ = input1_.variances_;
+                            output.alpha_min_ = input1_.alpha_min_;
+                            output.alpha_max_ = input1_.alpha_max_;
                             output.ciphertext_generated_ = true;
-                            output.storage_type_ = storage_type::DEVICE;
+                            output.storage_type_ = storage_type::device;
 
-                            NOT_computation(input1, output, options.stream_);
+                            NOT_computation(input1_, output, options.stream_);
                         },
                         options);
                 },
@@ -685,11 +706,11 @@ namespace heongpu
          * @param boot_key Bootstrapping key for the operation.
          * @param options Optional CUDA execution settings.
          */
-        __host__ void MUX(Ciphertext<Scheme::TFHE>& input1,
-                          Ciphertext<Scheme::TFHE>& input2,
-                          Ciphertext<Scheme::TFHE>& control_input,
+        __host__ void MUX(const Ciphertext<Scheme::TFHE>& input1,
+                          const Ciphertext<Scheme::TFHE>& input2,
+                          const Ciphertext<Scheme::TFHE>& control_input,
                           Ciphertext<Scheme::TFHE>& output,
-                          Bootstrappingkey<Scheme::TFHE>& boot_key,
+                          const Bootstrappingkey<Scheme::TFHE>& boot_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
             if ((input1.shape_ != input2.shape_) ||
@@ -700,115 +721,144 @@ namespace heongpu
 
             if (!(input1.ciphertext_generated_ && input2.ciphertext_generated_))
             {
-                throw std::runtime_error("One or the inputs are generated!");
+                throw std::runtime_error(
+                    "One or both inputs are not generated! Encrypt both "
+                    "ciphertexts before using them.");
             }
 
             input_storage_manager(
-                input1,
-                [&](Ciphertext<Scheme::TFHE>& input1_)
+                control_input,
+                [&](Ciphertext<Scheme::TFHE>& control_input_)
                 {
                     input_storage_manager(
-                        input2,
-                        [&](Ciphertext<Scheme::TFHE>& input2_)
+                        input1,
+                        [&](Ciphertext<Scheme::TFHE>& input1_)
                         {
                             input_storage_manager(
-                                boot_key,
-                                [&](Bootstrappingkey<Scheme::TFHE>& boot_key_)
+                                input2,
+                                [&](Ciphertext<Scheme::TFHE>& input2_)
                                 {
-                                    output_storage_manager(
-                                        output,
-                                        [&](Ciphertext<Scheme::TFHE>& output_)
+                                    input_storage_manager(
+                                        boot_key,
+                                        [&](Bootstrappingkey<Scheme::TFHE>&
+                                                boot_key_)
                                         {
-                                            Ciphertext<Scheme::TFHE>
-                                                temp_cipher1 =
-                                                    generate_empty_ciphertext(
-                                                        context_->n_,
-                                                        input1.shape_,
+                                            output_storage_manager(
+                                                output,
+                                                [&](Ciphertext<Scheme::TFHE>&
+                                                        output_)
+                                                {
+                                                    Ciphertext<Scheme::TFHE>
+                                                        temp_cipher1 =
+                                                            generate_empty_ciphertext(
+                                                                context_->n_,
+                                                                input1_.shape_,
+                                                                options
+                                                                    .stream_);
+
+                                                    AND_pre_computation(
+                                                        control_input_, input1_,
+                                                        temp_cipher1,
                                                         options.stream_);
 
-                                            AND_pre_computation(
-                                                control_input, input1,
-                                                temp_cipher1, options.stream_);
+                                                    Ciphertext<Scheme::TFHE>
+                                                        temp_cipher2 =
+                                                            generate_empty_ciphertext(
+                                                                (context_->k_ *
+                                                                 context_->N_),
+                                                                input1_.shape_,
+                                                                options
+                                                                    .stream_);
 
-                                            Ciphertext<Scheme::TFHE>
-                                                temp_cipher2 =
-                                                    generate_empty_ciphertext(
-                                                        (context_->k_ *
-                                                         context_->N_),
-                                                        input1.shape_,
+                                                    bootstrapping(
+                                                        temp_cipher1,
+                                                        temp_cipher2, boot_key_,
                                                         options.stream_);
 
-                                            bootstrapping(
-                                                temp_cipher1, temp_cipher2,
-                                                boot_key, options.stream_);
+                                                    //
 
-                                            //
+                                                    Ciphertext<Scheme::TFHE>
+                                                        temp_cipher3 =
+                                                            generate_empty_ciphertext(
+                                                                context_->n_,
+                                                                input1_.shape_,
+                                                                options
+                                                                    .stream_);
 
-                                            Ciphertext<Scheme::TFHE>
-                                                temp_cipher3 =
-                                                    generate_empty_ciphertext(
-                                                        context_->n_,
-                                                        input1.shape_,
+                                                    AND_N_pre_computation(
+                                                        control_input_, input2_,
+                                                        temp_cipher3,
                                                         options.stream_);
 
-                                            AND_N_pre_computation(
-                                                control_input, input2,
-                                                temp_cipher3, options.stream_);
+                                                    Ciphertext<Scheme::TFHE>
+                                                        temp_cipher4 =
+                                                            generate_empty_ciphertext(
+                                                                (context_->k_ *
+                                                                 context_->N_),
+                                                                input1_.shape_,
+                                                                options
+                                                                    .stream_);
 
-                                            Ciphertext<Scheme::TFHE>
-                                                temp_cipher4 =
-                                                    generate_empty_ciphertext(
-                                                        (context_->k_ *
-                                                         context_->N_),
-                                                        input1.shape_,
+                                                    bootstrapping(
+                                                        temp_cipher3,
+                                                        temp_cipher4, boot_key_,
                                                         options.stream_);
 
-                                            bootstrapping(
-                                                temp_cipher3, temp_cipher4,
-                                                boot_key, options.stream_);
+                                                    //
 
-                                            //
+                                                    Ciphertext<Scheme::TFHE>
+                                                        temp_cipher5 =
+                                                            generate_empty_ciphertext(
+                                                                (context_->k_ *
+                                                                 context_->N_),
+                                                                input1_.shape_,
+                                                                options
+                                                                    .stream_);
 
-                                            Ciphertext<Scheme::TFHE>
-                                                temp_cipher5 =
-                                                    generate_empty_ciphertext(
-                                                        (context_->k_ *
-                                                         context_->N_),
-                                                        input1.shape_,
+                                                    OR_pre_computation(
+                                                        temp_cipher2,
+                                                        temp_cipher4,
+                                                        temp_cipher5,
                                                         options.stream_);
 
-                                            OR_pre_computation(
-                                                temp_cipher2, temp_cipher4,
-                                                temp_cipher5, options.stream_);
+                                                    output.a_device_location_
+                                                        .resize(
+                                                            input1_.shape_ *
+                                                                context_->n_,
+                                                            options.stream_);
+                                                    output.b_device_location_
+                                                        .resize(
+                                                            input1_.shape_,
+                                                            options.stream_);
+                                                    output.n_ = input1_.n_;
+                                                    output.shape_ =
+                                                        input1_.shape_;
+                                                    output.variances_ =
+                                                        input1_.variances_;
+                                                    output.alpha_min_ =
+                                                        input1_.alpha_min_;
+                                                    output.alpha_max_ =
+                                                        input1_.alpha_max_;
+                                                    output
+                                                        .ciphertext_generated_ =
+                                                        true;
+                                                    output.storage_type_ =
+                                                        storage_type::device;
 
-                                            output.a_device_location_.resize(
-                                                input1.shape_ * context_->n_,
-                                                options.stream_);
-                                            output.b_device_location_.resize(
-                                                input1.shape_, options.stream_);
-                                            output.n_ = input1.n_;
-                                            output.shape_ = input1.shape_;
-                                            output.variances_ =
-                                                input1.variances_;
-                                            output.alpha_min_ =
-                                                input1.alpha_min_;
-                                            output.alpha_max_ =
-                                                input1.alpha_max_;
-                                            output.ciphertext_generated_ = true;
-                                            output.storage_type_ =
-                                                storage_type::DEVICE;
-
-                                            key_switching(temp_cipher5, output,
-                                                          boot_key,
-                                                          options.stream_);
+                                                    key_switching(
+                                                        temp_cipher5, output,
+                                                        boot_key_,
+                                                        options.stream_);
+                                                },
+                                                options);
                                         },
-                                        options);
+                                        options, false);
                                 },
-                                options, false);
+                                options, (&input2 == &output));
                         },
-                        options, (&input2 == &output));
+                        options, (&input1 == &output));
                 },
-                options, (&input1 == &output));
+                options, (&control_input == &output));
         }
 
       private:

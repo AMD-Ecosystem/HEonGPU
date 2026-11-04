@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -13,7 +14,10 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = std::move(context);
@@ -47,18 +51,15 @@ namespace heongpu
         Data64* error_poly = errors_a.data();
         Data64* a_poly = error_poly + (context_->Q_prime_size * context_->n);
 
-        RandomNumberGenerator::instance().set(
-            common_seed.key_, common_seed.nonce_,
-            common_seed.personalization_string_, stream);
-        RandomNumberGenerator::instance()
-            .modular_ternary_random_number_generation(
-                a_poly, context_->modulus_->data(), context_->n_power,
-                context_->Q_prime_size, 1, stream);
-
-        RNGSeed gen_seed;
-        RandomNumberGenerator::instance().set(gen_seed.key_, gen_seed.nonce_,
-                                              gen_seed.personalization_string_,
-                                              stream);
+        RandomNumberGenerator::instance().with_seed(
+            common_seed, stream,
+            [&]
+            {
+                RandomNumberGenerator::instance()
+                    .modular_ternary_random_number_generation(
+                        a_poly, context_->modulus_->data(), context_->n_power,
+                        context_->Q_prime_size, 1, stream);
+            });
 
         RandomNumberGenerator::instance()
             .modular_gaussian_random_number_generation(
@@ -118,244 +119,21 @@ namespace heongpu
     }
 
     __host__ void
-    HEMultiPartyManager<Scheme::CKKS>::generate_relin_key_method_I_stage_1(
+    HEMultiPartyManager<Scheme::CKKS>::generate_ckks_relin_key_stage_1(
         MultipartyRelinkey<Scheme::CKKS>& rk, Secretkey<Scheme::CKKS>& sk,
         const ExecutionOptions& options)
     {
+        sk.validate_context(context_);
         if (!sk.secret_key_generated_)
         {
-            throw std::logic_error("Secretkey is not generated!");
+            throw StateError("Secretkey is not generated! Call "
+                             "HEKeyGenerator::generate_secret_key first.");
         }
 
         if (rk.relin_key_generated_)
         {
-            throw std::logic_error("Relinkey is already generated!");
-        }
-
-        input_storage_manager(
-            sk,
-            [&](Secretkey<Scheme::CKKS>& sk_)
-            {
-                output_storage_manager(
-                    rk,
-                    [&](MultipartyRelinkey<Scheme::CKKS>& rk_)
-                    {
-                        RNGSeed common_seed = rk.seed();
-
-                        DeviceVector<Data64> random_values(
-                            context_->Q_prime_size *
-                                ((3 * context_->Q_size) + 1) * context_->n,
-                            options.stream_);
-                        Data64* e0 = random_values.data();
-                        Data64* e1 = e0 + (context_->Q_prime_size *
-                                           context_->Q_size * context_->n);
-                        Data64* u = e1 + (context_->Q_prime_size *
-                                          context_->Q_size * context_->n);
-                        Data64* common_a =
-                            u + (context_->Q_prime_size * context_->n);
-
-                        RandomNumberGenerator::instance().set(
-                            common_seed.key_, common_seed.nonce_,
-                            common_seed.personalization_string_,
-                            options.stream_);
-                        RandomNumberGenerator::instance()
-                            .modular_ternary_random_number_generation(
-                                common_a, context_->modulus_->data(),
-                                context_->n_power, context_->Q_prime_size,
-                                context_->Q_size, options.stream_);
-
-                        RNGSeed gen_seed1;
-                        RandomNumberGenerator::instance().set(
-                            gen_seed1.key_, gen_seed1.nonce_,
-                            gen_seed1.personalization_string_, options.stream_);
-
-                        RandomNumberGenerator::instance()
-                            .modular_gaussian_random_number_generation(
-                                error_std_dev, e0, context_->modulus_->data(),
-                                context_->n_power, context_->Q_prime_size,
-                                2 * context_->Q_size, options.stream_);
-
-                        RandomNumberGenerator::instance().set(
-                            new_seed_.key_, new_seed_.nonce_,
-                            new_seed_.personalization_string_, options.stream_);
-                        RandomNumberGenerator::instance()
-                            .modular_ternary_random_number_generation(
-                                u, context_->modulus_->data(),
-                                context_->n_power, context_->Q_prime_size, 1,
-                                options.stream_);
-
-                        RNGSeed gen_seed2;
-                        RandomNumberGenerator::instance().set(
-                            gen_seed2.key_, gen_seed2.nonce_,
-                            gen_seed2.personalization_string_, options.stream_);
-
-                        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                            .n_power = context_->n_power,
-                            .ntt_type = gpuntt::FORWARD,
-                            .ntt_layout = gpuntt::PerPolynomial,
-                            .reduction_poly =
-                                gpuntt::ReductionPolynomial::X_N_plus,
-                            .zero_padding = false,
-                            .stream = options.stream_};
-
-                        gpuntt::GPU_NTT_Inplace(
-                            random_values.data(), context_->ntt_table_->data(),
-                            context_->modulus_->data(), cfg_ntt,
-                            context_->Q_prime_size *
-                                ((2 * context_->Q_size) + 1),
-                            context_->Q_prime_size);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                        DeviceVector<Data64> output_memory(rk_.relinkey_size_,
-                                                           options.stream_);
-
-                        multi_party_relinkey_piece_method_I_stage_I_kernel<<<
-                            dim3((context_->n >> 8), context_->Q_prime_size, 1),
-                            256, 0, options.stream_>>>(
-                            output_memory.data(), sk.data(), common_a, u, e0,
-                            e1, context_->modulus_->data(),
-                            context_->factor_->data(), context_->n_power,
-                            context_->Q_prime_size);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                        rk_.memory_set(std::move(output_memory));
-
-                        rk_.relin_key_generated_ = true;
-                    },
-                    options);
-            },
-            options, false);
-    }
-
-    __host__ void
-    HEMultiPartyManager<Scheme::CKKS>::generate_relin_key_method_I_stage_3(
-        MultipartyRelinkey<Scheme::CKKS>& rk_stage_1,
-        MultipartyRelinkey<Scheme::CKKS>& rk_stage_2,
-        Secretkey<Scheme::CKKS>& sk, const ExecutionOptions& options)
-    {
-        if (!sk.secret_key_generated_)
-        {
-            throw std::logic_error("Secretkey is not generated!");
-        }
-
-        if (!rk_stage_1.relin_key_generated_)
-        {
-            throw std::logic_error("Relinkey1 is not generated!");
-        }
-
-        if (rk_stage_2.relin_key_generated_)
-        {
-            throw std::logic_error("Relinkey2 is already generated!");
-        }
-
-        input_storage_manager(
-            sk,
-            [&](Secretkey<Scheme::CKKS>& sk_)
-            {
-                input_storage_manager(
-                    rk_stage_1,
-                    [&](MultipartyRelinkey<Scheme::CKKS>& rk_stage_1_)
-                    {
-                        output_storage_manager(
-                            rk_stage_2,
-                            [&](MultipartyRelinkey<Scheme::CKKS>& rk_stage_2_)
-                            {
-                                DeviceVector<Data64> random_values(
-                                    context_->Q_prime_size *
-                                        ((2 * context_->Q_size) + 1) *
-                                        context_->n,
-                                    options.stream_);
-                                Data64* e0 = random_values.data();
-                                Data64* e1 =
-                                    e0 + (context_->Q_prime_size *
-                                          context_->Q_size * context_->n);
-                                Data64* u =
-                                    e1 + (context_->Q_prime_size *
-                                          context_->Q_size * context_->n);
-
-                                RandomNumberGenerator::instance()
-                                    .modular_gaussian_random_number_generation(
-                                        error_std_dev, e0,
-                                        context_->modulus_->data(),
-                                        context_->n_power,
-                                        context_->Q_prime_size, 2,
-                                        options.stream_);
-
-                                RandomNumberGenerator::instance().set(
-                                    new_seed_.key_, new_seed_.nonce_,
-                                    new_seed_.personalization_string_,
-                                    options.stream_);
-                                RandomNumberGenerator::instance()
-                                    .modular_ternary_random_number_generation(
-                                        u, context_->modulus_->data(),
-                                        context_->n_power,
-                                        context_->Q_prime_size, 1,
-                                        options.stream_);
-
-                                RNGSeed gen_seed;
-                                RandomNumberGenerator::instance().set(
-                                    gen_seed.key_, gen_seed.nonce_,
-                                    gen_seed.personalization_string_,
-                                    options.stream_);
-
-                                gpuntt::ntt_rns_configuration<Data64> cfg_ntt =
-                                    {.n_power = context_->n_power,
-                                     .ntt_type = gpuntt::FORWARD,
-                                     .ntt_layout = gpuntt::PerPolynomial,
-                                     .reduction_poly =
-                                         gpuntt::ReductionPolynomial::X_N_plus,
-                                     .zero_padding = false,
-                                     .stream = options.stream_};
-
-                                gpuntt::GPU_NTT_Inplace(
-                                    random_values.data(),
-                                    context_->ntt_table_->data(),
-                                    context_->modulus_->data(), cfg_ntt,
-                                    context_->Q_prime_size *
-                                        ((2 * context_->Q_size) + 1),
-                                    context_->Q_prime_size);
-                                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                                DeviceVector<Data64> output_memory(
-                                    rk_stage_2_.relinkey_size_,
-                                    options.stream_);
-
-                                multi_party_relinkey_piece_method_I_II_stage_II_kernel<<<
-                                    dim3((context_->n >> 8),
-                                         context_->Q_prime_size, 1),
-                                    256, 0, options.stream_>>>(
-                                    rk_stage_1_.data(), output_memory.data(),
-                                    sk.data(), u, e0, e1,
-                                    context_->modulus_->data(),
-                                    context_->n_power, context_->Q_prime_size,
-                                    context_->Q_size);
-                                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                                rk_stage_2_.memory_set(
-                                    std::move(output_memory));
-
-                                rk_stage_2_.relin_key_generated_ = true;
-                            },
-                            options);
-                    },
-                    options, false);
-            },
-            options, false);
-    }
-
-    __host__ void HEMultiPartyManager<Scheme::CKKS>::
-        generate_ckks_relin_key_method_II_stage_1(
-            MultipartyRelinkey<Scheme::CKKS>& rk, Secretkey<Scheme::CKKS>& sk,
-            const ExecutionOptions& options)
-    {
-        if (!sk.secret_key_generated_)
-        {
-            throw std::logic_error("Secretkey is not generated!");
-        }
-
-        if (rk.relin_key_generated_)
-        {
-            throw std::logic_error("Relinkey is already generated!");
+            throw StateError("Relinkey is already generated! "
+                             "Use a new Relinkey object.");
         }
 
         input_storage_manager(
@@ -383,21 +161,18 @@ namespace heongpu
                         Data64* common_a =
                             u + (context_->Q_prime_size * context_->n);
 
-                        RandomNumberGenerator::instance().set(
-                            common_seed.key_, common_seed.nonce_,
-                            common_seed.personalization_string_,
-                            options.stream_);
-                        RandomNumberGenerator::instance()
-                            .modular_ternary_random_number_generation(
-                                common_a, context_->modulus_->data(),
-                                context_->n_power, context_->Q_prime_size,
-                                context_->d_leveled->operator[](0),
-                                options.stream_);
-
-                        RNGSeed gen_seed1;
-                        RandomNumberGenerator::instance().set(
-                            gen_seed1.key_, gen_seed1.nonce_,
-                            gen_seed1.personalization_string_, options.stream_);
+                        RandomNumberGenerator::instance().with_seed(
+                            common_seed, options.stream_,
+                            [&]
+                            {
+                                RandomNumberGenerator::instance()
+                                    .modular_ternary_random_number_generation(
+                                        common_a, context_->modulus_->data(),
+                                        context_->n_power,
+                                        context_->Q_prime_size,
+                                        context_->d_leveled->operator[](0),
+                                        options.stream_);
+                            });
 
                         RandomNumberGenerator::instance()
                             .modular_gaussian_random_number_generation(
@@ -406,19 +181,17 @@ namespace heongpu
                                 2 * context_->d_leveled->operator[](0),
                                 options.stream_);
 
-                        RandomNumberGenerator::instance().set(
-                            new_seed_.key_, new_seed_.nonce_,
-                            new_seed_.personalization_string_, options.stream_);
-                        RandomNumberGenerator::instance()
-                            .modular_ternary_random_number_generation(
-                                u, context_->modulus_->data(),
-                                context_->n_power, context_->Q_prime_size, 1,
-                                options.stream_);
-
-                        RNGSeed gen_seed2;
-                        RandomNumberGenerator::instance().set(
-                            gen_seed2.key_, gen_seed2.nonce_,
-                            gen_seed2.personalization_string_, options.stream_);
+                        RandomNumberGenerator::instance().with_seed(
+                            new_seed_, options.stream_,
+                            [&]
+                            {
+                                RandomNumberGenerator::instance()
+                                    .modular_ternary_random_number_generation(
+                                        u, context_->modulus_->data(),
+                                        context_->n_power,
+                                        context_->Q_prime_size, 1,
+                                        options.stream_);
+                            });
 
                         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
                             .n_power = context_->n_power,
@@ -440,7 +213,7 @@ namespace heongpu
                         DeviceVector<Data64> output_memory(rk_.relinkey_size_,
                                                            options.stream_);
 
-                        multi_party_relinkey_piece_method_II_stage_I_kernel<<<
+                        multi_party_relinkey_piece_stage_I_kernel<<<
                             dim3((context_->n >> 8), context_->Q_prime_size, 1),
                             256, 0, options.stream_>>>(
                             output_memory.data(), sk.data(), common_a, u, e0,
@@ -461,25 +234,29 @@ namespace heongpu
             options, false);
     }
 
-    __host__ void HEMultiPartyManager<Scheme::CKKS>::
-        generate_ckks_relin_key_method_II_stage_3(
-            MultipartyRelinkey<Scheme::CKKS>& rk_stage_1,
-            MultipartyRelinkey<Scheme::CKKS>& rk_stage_2,
-            Secretkey<Scheme::CKKS>& sk, const ExecutionOptions& options)
+    __host__ void
+    HEMultiPartyManager<Scheme::CKKS>::generate_ckks_relin_key_stage_3(
+        MultipartyRelinkey<Scheme::CKKS>& rk_stage_1,
+        MultipartyRelinkey<Scheme::CKKS>& rk_stage_2,
+        Secretkey<Scheme::CKKS>& sk, const ExecutionOptions& options)
     {
+        sk.validate_context(context_);
         if (!sk.secret_key_generated_)
         {
-            throw std::logic_error("Secretkey is not generated!");
+            throw StateError("Secretkey is not generated! Call "
+                             "HEKeyGenerator::generate_secret_key first.");
         }
 
         if (!rk_stage_1.relin_key_generated_)
         {
-            throw std::logic_error("Relinkey1 is not generated!");
+            throw StateError("Relinkey1 is not generated! "
+                             "Generate the stage 1 relinearization key first.");
         }
 
         if (rk_stage_2.relin_key_generated_)
         {
-            throw std::logic_error("Relinkey2 is already generated!");
+            throw StateError("Relinkey2 is already generated! "
+                             "Use a new Relinkey object.");
         }
 
         input_storage_manager(
@@ -516,25 +293,21 @@ namespace heongpu
                                         error_std_dev, e0,
                                         context_->modulus_->data(),
                                         context_->n_power,
-                                        context_->Q_prime_size, 2,
+                                        context_->Q_prime_size,
+                                        2 * context_->d_leveled->operator[](0),
                                         options.stream_);
 
-                                RandomNumberGenerator::instance().set(
-                                    new_seed_.key_, new_seed_.nonce_,
-                                    new_seed_.personalization_string_,
-                                    options.stream_);
-                                RandomNumberGenerator::instance()
-                                    .modular_ternary_random_number_generation(
-                                        u, context_->modulus_->data(),
-                                        context_->n_power,
-                                        context_->Q_prime_size, 1,
-                                        options.stream_);
-
-                                RNGSeed gen_seed;
-                                RandomNumberGenerator::instance().set(
-                                    gen_seed.key_, gen_seed.nonce_,
-                                    gen_seed.personalization_string_,
-                                    options.stream_);
+                                RandomNumberGenerator::instance().with_seed(
+                                    new_seed_, options.stream_,
+                                    [&]
+                                    {
+                                        RandomNumberGenerator::instance()
+                                            .modular_ternary_random_number_generation(
+                                                u, context_->modulus_->data(),
+                                                context_->n_power,
+                                                context_->Q_prime_size, 1,
+                                                options.stream_);
+                                    });
 
                                 gpuntt::ntt_rns_configuration<Data64> cfg_ntt =
                                     {.n_power = context_->n_power,
@@ -559,7 +332,7 @@ namespace heongpu
                                 DeviceVector<Data64> output_memory(
                                     rk_stage_2.relinkey_size_, options.stream_);
 
-                                multi_party_relinkey_piece_method_I_II_stage_II_kernel<<<
+                                multi_party_relinkey_piece_stage_II_kernel<<<
                                     dim3((context_->n >> 8),
                                          context_->Q_prime_size, 1),
                                     256, 0, options.stream_>>>(
@@ -603,18 +376,7 @@ namespace heongpu
         }
 
         int dimension;
-        switch (static_cast<int>(rk.key_type))
-        {
-            case 1: // KEYSWITCHING_METHOD_I
-                dimension = rk.Q_size_;
-                break;
-            case 2: // KEYSWITCHING_METHOD_II
-                dimension = rk.d_;
-                break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
-        }
+        dimension = rk.d_;
 
         input_vector_storage_manager(
             all_rk,
@@ -627,7 +389,7 @@ namespace heongpu
                         DeviceVector<Data64> output_memory(rk_.relinkey_size_,
                                                            options.stream_);
 
-                        multi_party_relinkey_method_I_stage_I_kernel<<<
+                        multi_party_relinkey_stage_I_kernel<<<
                             dim3((context_->n >> 8), context_->Q_prime_size, 1),
                             256, 0, options.stream_>>>(
                             all_rk[0].data(), output_memory.data(),
@@ -637,7 +399,7 @@ namespace heongpu
 
                         for (int i = 1; i < participant_count; i++)
                         {
-                            multi_party_relinkey_method_I_stage_I_kernel<<<
+                            multi_party_relinkey_stage_I_kernel<<<
                                 dim3((context_->n >> 8), context_->Q_prime_size,
                                      1),
                                 256, 0, options.stream_>>>(
@@ -684,18 +446,7 @@ namespace heongpu
         }
 
         int dimension;
-        switch (static_cast<int>(rk.key_type))
-        {
-            case 1: // KEYSWITCHING_METHOD_I
-                dimension = rk.Q_size_;
-                break;
-            case 2: // KEYSWITCHING_METHOD_II
-                dimension = rk.d_;
-                break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
-        }
+        dimension = rk.d_;
 
         input_vector_storage_manager(
             all_rk,
@@ -712,7 +463,7 @@ namespace heongpu
                                 DeviceVector<Data64> output_memory(
                                     rk_.relinkey_size_, options.stream_);
 
-                                multi_party_relinkey_method_I_stage_II_kernel<<<
+                                multi_party_relinkey_stage_II_kernel<<<
                                     dim3((context_->n >> 8),
                                          context_->Q_prime_size, 1),
                                     256, 0, options.stream_>>>(
@@ -725,7 +476,7 @@ namespace heongpu
 
                                 for (int i = 1; i < participant_count; i++)
                                 {
-                                    multi_party_relinkey_method_I_stage_II_kernel<<<
+                                    multi_party_relinkey_stage_II_kernel<<<
                                         dim3((context_->n >> 8),
                                              context_->Q_prime_size, 1),
                                         256, 0, options.stream_>>>(
@@ -748,286 +499,21 @@ namespace heongpu
     }
 
     __host__ void
-    HEMultiPartyManager<Scheme::CKKS>::generate_galois_key_method_I_stage_1(
+    HEMultiPartyManager<Scheme::CKKS>::generate_galois_key_stage_1(
         MultipartyGaloiskey<Scheme::CKKS>& gk, Secretkey<Scheme::CKKS>& sk,
         const ExecutionOptions& options)
     {
+        sk.validate_context(context_);
         if (!sk.secret_key_generated_)
         {
-            throw std::logic_error("Secretkey is not generated!");
+            throw StateError("Secretkey is not generated! Call "
+                             "HEKeyGenerator::generate_secret_key first.");
         }
 
         if (gk.galois_key_generated_)
         {
-            throw std::logic_error("Galoiskey is already generated!");
-        }
-
-        RNGSeed common_seed = gk.seed();
-
-        DeviceVector<Data64> errors_a(2 * context_->Q_prime_size *
-                                          context_->Q_size * context_->n,
-                                      options.stream_);
-        Data64* error_poly = errors_a.data();
-        Data64* a_poly = error_poly + (context_->Q_prime_size *
-                                       context_->Q_size * context_->n);
-
-        RandomNumberGenerator::instance().set(
-            common_seed.key_, common_seed.nonce_,
-            common_seed.personalization_string_, options.stream_);
-        RandomNumberGenerator::instance()
-            .modular_ternary_random_number_generation(
-                a_poly, context_->modulus_->data(), context_->n_power,
-                context_->Q_prime_size, context_->Q_size, options.stream_);
-
-        RNGSeed gen_seed1;
-        RandomNumberGenerator::instance().set(gen_seed1.key_, gen_seed1.nonce_,
-                                              gen_seed1.personalization_string_,
-                                              options.stream_);
-
-        input_storage_manager(
-            sk,
-            [&](Secretkey<Scheme::CKKS>& sk_)
-            {
-                if (!gk.customized)
-                {
-                    // Positive Row Shift
-                    for (auto& galois : gk.galois_elt)
-                    {
-                        RandomNumberGenerator::instance()
-                            .modular_gaussian_random_number_generation(
-                                error_std_dev, error_poly,
-                                context_->modulus_->data(), context_->n_power,
-                                context_->Q_prime_size, context_->Q_size,
-                                options.stream_);
-
-                        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                            .n_power = context_->n_power,
-                            .ntt_type = gpuntt::FORWARD,
-                            .ntt_layout = gpuntt::PerPolynomial,
-                            .reduction_poly =
-                                gpuntt::ReductionPolynomial::X_N_plus,
-                            .zero_padding = false,
-                            .stream = options.stream_};
-
-                        gpuntt::GPU_NTT_Inplace(
-                            error_poly, context_->ntt_table_->data(),
-                            context_->modulus_->data(), cfg_ntt,
-                            context_->Q_size * context_->Q_prime_size,
-                            context_->Q_prime_size);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                        int inv_galois =
-                            modInverse(galois.second, 2 * context_->n);
-
-                        DeviceVector<Data64> output_memory(gk.galoiskey_size_,
-                                                           options.stream_);
-
-                        galoiskey_gen_kernel<<<dim3((context_->n >> 8),
-                                                    context_->Q_prime_size, 1),
-                                               256, 0, options.stream_>>>(
-                            output_memory.data(), sk.data(), error_poly, a_poly,
-                            context_->modulus_->data(),
-                            context_->factor_->data(), inv_galois,
-                            context_->n_power, context_->Q_prime_size);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                        if (options.storage_ == storage_type::DEVICE)
-                        {
-                            gk.device_location_[galois.second] =
-                                std::move(output_memory);
-                        }
-                        else
-                        {
-                            gk.host_location_[galois.second] =
-                                HostVector<Data64>(gk.galoiskey_size_);
-                            cudaMemcpyAsync(
-                                gk.host_location_[galois.second].data(),
-                                output_memory.data(),
-                                gk.galoiskey_size_ * sizeof(Data64),
-                                cudaMemcpyDeviceToHost, options.stream_);
-                            HEONGPU_CUDA_CHECK(cudaGetLastError());
-                        }
-                    }
-
-                    // Columns Rotate
-                    RandomNumberGenerator::instance()
-                        .modular_gaussian_random_number_generation(
-                            error_std_dev, error_poly,
-                            context_->modulus_->data(), context_->n_power,
-                            context_->Q_prime_size, context_->Q_size,
-                            options.stream_);
-
-                    gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                        .n_power = context_->n_power,
-                        .ntt_type = gpuntt::FORWARD,
-                        .ntt_layout = gpuntt::PerPolynomial,
-                        .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                        .zero_padding = false,
-                        .stream = options.stream_};
-
-                    gpuntt::GPU_NTT_Inplace(
-                        error_poly, context_->ntt_table_->data(),
-                        context_->modulus_->data(), cfg_ntt,
-                        context_->Q_size * context_->Q_prime_size,
-                        context_->Q_prime_size);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    DeviceVector<Data64> output_memory(gk.galoiskey_size_,
-                                                       options.stream_);
-
-                    galoiskey_gen_kernel<<<dim3((context_->n >> 8),
-                                                context_->Q_prime_size, 1),
-                                           256, 0, options.stream_>>>(
-                        output_memory.data(), sk.data(), error_poly, a_poly,
-                        context_->modulus_->data(), context_->factor_->data(),
-                        gk.galois_elt_zero, context_->n_power,
-                        context_->Q_prime_size);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    if (options.storage_ == storage_type::DEVICE)
-                    {
-                        gk.zero_device_location_ = std::move(output_memory);
-                    }
-                    else
-                    {
-                        gk.zero_host_location_ =
-                            HostVector<Data64>(gk.galoiskey_size_);
-                        cudaMemcpyAsync(
-                            gk.zero_host_location_.data(), output_memory.data(),
-                            gk.galoiskey_size_ * sizeof(Data64),
-                            cudaMemcpyDeviceToHost, options.stream_);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-                    }
-                }
-                else
-                {
-                    for (auto& galois_ : gk.custom_galois_elt)
-                    {
-                        RandomNumberGenerator::instance()
-                            .modular_gaussian_random_number_generation(
-                                error_std_dev, error_poly,
-                                context_->modulus_->data(), context_->n_power,
-                                context_->Q_prime_size, context_->Q_size,
-                                options.stream_);
-
-                        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                            .n_power = context_->n_power,
-                            .ntt_type = gpuntt::FORWARD,
-                            .ntt_layout = gpuntt::PerPolynomial,
-                            .reduction_poly =
-                                gpuntt::ReductionPolynomial::X_N_plus,
-                            .zero_padding = false,
-                            .stream = options.stream_};
-
-                        gpuntt::GPU_NTT_Inplace(
-                            error_poly, context_->ntt_table_->data(),
-                            context_->modulus_->data(), cfg_ntt,
-                            context_->Q_size * context_->Q_prime_size,
-                            context_->Q_prime_size);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                        int inv_galois = modInverse(galois_, 2 * context_->n);
-
-                        DeviceVector<Data64> output_memory(gk.galoiskey_size_,
-                                                           options.stream_);
-
-                        galoiskey_gen_kernel<<<dim3((context_->n >> 8),
-                                                    context_->Q_prime_size, 1),
-                                               256, 0, options.stream_>>>(
-                            output_memory.data(), sk.data(), error_poly, a_poly,
-                            context_->modulus_->data(),
-                            context_->factor_->data(), inv_galois,
-                            context_->n_power, context_->Q_prime_size);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                        if (options.storage_ == storage_type::DEVICE)
-                        {
-                            gk.device_location_[galois_] =
-                                std::move(output_memory);
-                        }
-                        else
-                        {
-                            gk.host_location_[galois_] =
-                                HostVector<Data64>(gk.galoiskey_size_);
-                            cudaMemcpyAsync(gk.host_location_[galois_].data(),
-                                            output_memory.data(),
-                                            gk.galoiskey_size_ * sizeof(Data64),
-                                            cudaMemcpyDeviceToHost,
-                                            options.stream_);
-                            HEONGPU_CUDA_CHECK(cudaGetLastError());
-                        }
-                    }
-
-                    // Columns Rotate
-                    RandomNumberGenerator::instance()
-                        .modular_gaussian_random_number_generation(
-                            error_std_dev, error_poly,
-                            context_->modulus_->data(), context_->n_power,
-                            context_->Q_prime_size, context_->Q_size,
-                            options.stream_);
-
-                    gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                        .n_power = context_->n_power,
-                        .ntt_type = gpuntt::FORWARD,
-                        .ntt_layout = gpuntt::PerPolynomial,
-                        .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                        .zero_padding = false,
-                        .stream = options.stream_};
-
-                    gpuntt::GPU_NTT_Inplace(
-                        error_poly, context_->ntt_table_->data(),
-                        context_->modulus_->data(), cfg_ntt,
-                        context_->Q_size * context_->Q_prime_size,
-                        context_->Q_prime_size);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    DeviceVector<Data64> output_memory(gk.galoiskey_size_,
-                                                       options.stream_);
-
-                    galoiskey_gen_kernel<<<dim3((context_->n >> 8),
-                                                context_->Q_prime_size, 1),
-                                           256, 0, options.stream_>>>(
-                        output_memory.data(), sk.data(), error_poly, a_poly,
-                        context_->modulus_->data(), context_->factor_->data(),
-                        gk.galois_elt_zero, context_->n_power,
-                        context_->Q_prime_size);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    if (options.storage_ == storage_type::DEVICE)
-                    {
-                        gk.zero_device_location_ = std::move(output_memory);
-                    }
-                    else
-                    {
-                        gk.zero_host_location_ =
-                            HostVector<Data64>(gk.galoiskey_size_);
-                        cudaMemcpyAsync(
-                            gk.zero_host_location_.data(), output_memory.data(),
-                            gk.galoiskey_size_ * sizeof(Data64),
-                            cudaMemcpyDeviceToHost, options.stream_);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-                    }
-                }
-
-                gk.galois_key_generated_ = true;
-                gk.storage_type_ = options.storage_;
-            },
-            options, false);
-    }
-
-    __host__ void
-    HEMultiPartyManager<Scheme::CKKS>::generate_galois_key_method_II_stage_1(
-        MultipartyGaloiskey<Scheme::CKKS>& gk, Secretkey<Scheme::CKKS>& sk,
-        const ExecutionOptions& options)
-    {
-        if (!sk.secret_key_generated_)
-        {
-            throw std::logic_error("Secretkey is not generated!");
-        }
-
-        if (gk.galois_key_generated_)
-        {
-            throw std::logic_error("Galoiskey is already generated!");
+            throw StateError("Galoiskey is already generated! "
+                             "Use a new Galoiskey object.");
         }
 
         RNGSeed common_seed = gk.seed();
@@ -1041,19 +527,16 @@ namespace heongpu
             error_poly + (context_->Q_prime_size *
                           context_->d_leveled->operator[](0) * context_->n);
 
-        RandomNumberGenerator::instance().set(
-            common_seed.key_, common_seed.nonce_,
-            common_seed.personalization_string_, options.stream_);
-        RandomNumberGenerator::instance()
-            .modular_ternary_random_number_generation(
-                a_poly, context_->modulus_->data(), context_->n_power,
-                context_->Q_prime_size, context_->d_leveled->operator[](0),
-                options.stream_);
-
-        RNGSeed gen_seed1;
-        RandomNumberGenerator::instance().set(gen_seed1.key_, gen_seed1.nonce_,
-                                              gen_seed1.personalization_string_,
-                                              options.stream_);
+        RandomNumberGenerator::instance().with_seed(
+            common_seed, options.stream_,
+            [&]
+            {
+                RandomNumberGenerator::instance()
+                    .modular_ternary_random_number_generation(
+                        a_poly, context_->modulus_->data(), context_->n_power,
+                        context_->Q_prime_size,
+                        context_->d_leveled->operator[](0), options.stream_);
+            });
 
         input_storage_manager(
             sk,
@@ -1107,7 +590,7 @@ namespace heongpu
                             context_->Q_size, context_->P_size);
                         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-                        if (options.storage_ == storage_type::DEVICE)
+                        if (options.storage_ == storage_type::device)
                         {
                             gk.device_location_[galois.second] =
                                 std::move(output_memory);
@@ -1165,7 +648,7 @@ namespace heongpu
                         context_->P_size);
                     HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-                    if (options.storage_ == storage_type::DEVICE)
+                    if (options.storage_ == storage_type::device)
                     {
                         gk.zero_device_location_ = std::move(output_memory);
                     }
@@ -1226,7 +709,7 @@ namespace heongpu
                             context_->Q_size, context_->P_size);
                         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-                        if (options.storage_ == storage_type::DEVICE)
+                        if (options.storage_ == storage_type::device)
                         {
                             gk.device_location_[galois_] =
                                 std::move(output_memory);
@@ -1284,7 +767,7 @@ namespace heongpu
                         context_->P_size);
                     HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-                    if (options.storage_ == storage_type::DEVICE)
+                    if (options.storage_ == storage_type::device)
                     {
                         gk.zero_device_location_ = std::move(output_memory);
                     }
@@ -1344,7 +827,7 @@ namespace heongpu
         {
             input_storage_types.push_back(all_gk[i].storage_type_);
 
-            if (all_gk[i].storage_type_ == storage_type::DEVICE)
+            if (all_gk[i].storage_type_ == storage_type::device)
             {
                 for (const auto& pair : all_gk[i].device_location_)
                 {
@@ -1373,27 +856,16 @@ namespace heongpu
         }
 
         int dimension;
-        switch (static_cast<int>(gk.key_type))
-        {
-            case 1: // KEYSWITCHING_METHOD_I
-                dimension = gk.Q_size_;
-                break;
-            case 2: // KEYSWITCHING_METHOD_II
-                dimension = gk.d_;
-                break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
-        }
+        dimension = gk.d_;
 
         for (auto& galois : gk.galois_elt)
         {
             DeviceVector<Data64> output_memory(gk.galoiskey_size_,
                                                options.stream_);
 
-            multi_party_galoiskey_gen_method_I_II_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                options.stream_>>>(
+            multi_party_galoiskey_gen_kernel<<<dim3((context_->n >> 8),
+                                                    context_->Q_prime_size, 1),
+                                               256, 0, options.stream_>>>(
                 output_memory.data(),
                 all_gk[0].device_location_[galois.second].data(),
                 context_->modulus_->data(), context_->n_power,
@@ -1402,7 +874,7 @@ namespace heongpu
 
             for (int i = 1; i < participant_count; i++)
             {
-                multi_party_galoiskey_gen_method_I_II_kernel<<<
+                multi_party_galoiskey_gen_kernel<<<
                     dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
                     options.stream_>>>(
                     output_memory.data(),
@@ -1412,7 +884,7 @@ namespace heongpu
                 HEONGPU_CUDA_CHECK(cudaGetLastError());
             }
 
-            if (options.storage_ == storage_type::DEVICE)
+            if (options.storage_ == storage_type::device)
             {
                 gk.device_location_[galois.second] = std::move(output_memory);
             }
@@ -1430,26 +902,26 @@ namespace heongpu
 
         DeviceVector<Data64> output_memory(gk.galoiskey_size_, options.stream_);
 
-        multi_party_galoiskey_gen_method_I_II_kernel<<<
-            dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-            options.stream_>>>(output_memory.data(),
-                               all_gk[0].zero_device_location_.data(),
-                               context_->modulus_->data(), context_->n_power,
-                               context_->Q_prime_size, dimension, true);
+        multi_party_galoiskey_gen_kernel<<<dim3((context_->n >> 8),
+                                                context_->Q_prime_size, 1),
+                                           256, 0, options.stream_>>>(
+            output_memory.data(), all_gk[0].zero_device_location_.data(),
+            context_->modulus_->data(), context_->n_power,
+            context_->Q_prime_size, dimension, true);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
         for (int i = 1; i < participant_count; i++)
         {
-            multi_party_galoiskey_gen_method_I_II_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                options.stream_>>>(
+            multi_party_galoiskey_gen_kernel<<<dim3((context_->n >> 8),
+                                                    context_->Q_prime_size, 1),
+                                               256, 0, options.stream_>>>(
                 output_memory.data(), all_gk[i].zero_device_location_.data(),
                 context_->modulus_->data(), context_->n_power,
                 context_->Q_prime_size, dimension, false);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
 
-        if (options.storage_ == storage_type::DEVICE)
+        if (options.storage_ == storage_type::device)
         {
             gk.zero_device_location_ = std::move(output_memory);
         }
@@ -1466,7 +938,7 @@ namespace heongpu
         {
             for (int i = 0; i < participant_count; i++)
             {
-                if (input_storage_types[i] == storage_type::DEVICE)
+                if (input_storage_types[i] == storage_type::device)
                 {
                     // pass
                 }
@@ -1645,19 +1117,15 @@ namespace heongpu
         Data64* a_poly = error_poly1 + (context_->Q_size * context_->n);
 
         // a poly generation (assume in NTT domain)
-        RandomNumberGenerator::instance().set(
-            common_seed.key_, common_seed.nonce_,
-            common_seed.personalization_string_, stream);
-
-        RandomNumberGenerator::instance()
-            .modular_uniform_random_number_generation(
-                a_poly, context_->modulus_->data(), context_->n_power,
-                context_->Q_size, 1, stream);
-
-        RNGSeed gen_seed;
-        RandomNumberGenerator::instance().set(gen_seed.key_, gen_seed.nonce_,
-                                              gen_seed.personalization_string_,
-                                              stream);
+        RandomNumberGenerator::instance().with_seed(
+            common_seed, stream,
+            [&]
+            {
+                RandomNumberGenerator::instance()
+                    .modular_uniform_random_number_generation(
+                        a_poly, context_->modulus_->data(), context_->n_power,
+                        context_->Q_size, 1, stream);
+            });
 
         // error0 poly generation
         RandomNumberGenerator::instance()
@@ -1885,19 +1353,15 @@ namespace heongpu
                              context_->n_power);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-        RandomNumberGenerator::instance().set(
-            common_seed.key_, common_seed.nonce_,
-            common_seed.personalization_string_, stream);
-
-        RandomNumberGenerator::instance()
-            .modular_uniform_random_number_generation(
-                o_c1, context_->modulus_->data(), context_->n_power,
-                context_->Q_size, 1, stream);
-
-        RNGSeed gen_seed;
-        RandomNumberGenerator::instance().set(gen_seed.key_, gen_seed.nonce_,
-                                              gen_seed.personalization_string_,
-                                              stream);
+        RandomNumberGenerator::instance().with_seed(
+            common_seed, stream,
+            [&]
+            {
+                RandomNumberGenerator::instance()
+                    .modular_uniform_random_number_generation(
+                        o_c1, context_->modulus_->data(), context_->n_power,
+                        context_->Q_size, 1, stream);
+            });
 
         output.memory_set(std::move(output_memory));
     }

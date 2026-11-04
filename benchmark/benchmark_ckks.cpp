@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -144,7 +145,7 @@ int main(int argc, char* argv[])
             encryptor.encrypt(C3, P1);
 
             cudaEventRecord(start_time);
-            operators.rotate_rows(C3, C3, galois_key, 1);
+            operators.rotate(C3, C3, galois_key, 1);
             cudaEventRecord(stop_time);
             cudaEventSynchronize(stop_time);
             cudaEventElapsedTime(&time, start_time, stop_time);

@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -12,54 +13,44 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = context;
         scheme_ = context->scheme_;
-        key_type = context->keyswitching_type_;
 
         ring_size = context->n;
         Q_prime_size_ = context->Q_prime_size;
         Q_size_ = context->Q_size;
 
-        switch (static_cast<int>(context->keyswitching_type_))
-        {
-            case 1: // KEYSWITCHING_METHOD_I
-            {
-                relinkey_size_ = 2 * Q_size_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            case 2: // KEYSWITCHING_METHOD_II
-            {
-                d_ = context->d_leveled->operator[](0);
-                relinkey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            default:
-                break;
-        }
+        d_ = context->d_leveled->operator[](0);
+        relinkey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
     }
 
     void Relinkey<Scheme::CKKS>::store_in_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
         else
         {
             device_location_ = DeviceVector<Data64>(host_location_, stream);
+            // The copies above read host memory until they finish.
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
             host_location_.resize(0);
             host_location_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Relinkey<Scheme::CKKS>::store_in_host(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             host_location_ = HostVector<Data64>(relinkey_size_);
             cudaMemcpyAsync(host_location_.data(), device_location_.data(),
@@ -69,7 +60,7 @@ namespace heongpu
 
             device_location_.resize(0, stream);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -79,7 +70,19 @@ namespace heongpu
 
     Data64* Relinkey<Scheme::CKKS>::data()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
+        {
+            return device_location_.data();
+        }
+        else
+        {
+            return host_location_.data();
+        }
+    }
+
+    const Data64* Relinkey<Scheme::CKKS>::data() const
+    {
+        if (storage_type_ == storage_type::device)
         {
             return device_location_.data();
         }
@@ -90,7 +93,7 @@ namespace heongpu
     }
     Data64* Relinkey<Scheme::CKKS>::data(size_t i)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             return device_location_leveled_[i].data();
         }
@@ -100,13 +103,30 @@ namespace heongpu
         }
     }
 
-    void Relinkey<Scheme::CKKS>::save(std::ostream& os) const
+    const Data64* Relinkey<Scheme::CKKS>::data(size_t i) const
+    {
+        if (storage_type_ == storage_type::device)
+        {
+            return device_location_leveled_[i].data();
+        }
+        else
+        {
+            return host_location_leveled_[i].data();
+        }
+    }
+
+    void Relinkey<Scheme::CKKS>::save(std::ostream& os,
+                                      serialization_format format) const
     {
         if (relin_key_generated_)
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::relin_key, scheme_,
+                serialized_context_id());
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
-            os.write((char*) &key_type, sizeof(key_type));
+            detail::write_keyswitching_byte(os);
 
             os.write((char*) &ring_size, sizeof(ring_size));
 
@@ -127,7 +147,7 @@ namespace heongpu
 
             os.write((char*) &relinkey_size_, sizeof(relinkey_size_));
 
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 HostVector<Data64> host_locations_temp(relinkey_size_);
                 cudaMemcpy(host_locations_temp.data(), device_location_.data(),
@@ -156,14 +176,28 @@ namespace heongpu
     {
         if ((!relin_key_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::relin_key,
+                    scheme_type::ckks);
+            detail::validate_loaded_context_identity(
+                serialized_context_id(), loaded_context_id, "Relinkey");
+            if (loaded_context_id != 0)
+            {
+                context_id_ = loaded_context_id;
+            }
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
             if (scheme_ != scheme_type::ckks)
             {
-                throw std::runtime_error("Invalid scheme binary!");
+                throw SerializationError(
+                    error_message("Invalid scheme binary! Expected CKKS data, "
+                                  "found scheme id ",
+                                  static_cast<int>(scheme_), "."));
             }
 
-            is.read((char*) &key_type, sizeof(key_type));
+            detail::read_keyswitching_byte(is, "Relinkey");
 
             is.read((char*) &ring_size, sizeof(ring_size));
 
@@ -184,7 +218,7 @@ namespace heongpu
 
             is.read((char*) &relinkey_size_, sizeof(relinkey_size_));
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
             relin_key_generated_ = true;
 
             HostVector<Data64> host_locations_temp(relinkey_size_);
@@ -203,9 +237,9 @@ namespace heongpu
         }
     }
 
-    int Relinkey<Scheme::CKKS>::memory_size()
+    int Relinkey<Scheme::CKKS>::memory_size() const
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             if (relinkey_size_leveled_.size() == 0)
             {
@@ -265,7 +299,7 @@ namespace heongpu
     void
     Relinkey<Scheme::CKKS>::memory_set(DeviceVector<Data64>&& new_device_vector)
     {
-        storage_type_ = storage_type::DEVICE;
+        storage_type_ = storage_type::device;
         device_location_ = std::move(new_device_vector);
 
         if (host_location_.size() > 0)
@@ -279,7 +313,7 @@ namespace heongpu
     Relinkey<Scheme::CKKS>::memory_set(DeviceVector<Data64>&& new_device_vector,
                                        int i)
     {
-        storage_type_ = storage_type::DEVICE;
+        storage_type_ = storage_type::device;
         device_location_leveled_[i] = std::move(new_device_vector);
 
         for (int i = 0; i < host_location_leveled_.size(); i++)
@@ -294,7 +328,7 @@ namespace heongpu
 
     void Relinkey<Scheme::CKKS>::copy_to_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -324,13 +358,13 @@ namespace heongpu
                 }
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Relinkey<Scheme::CKKS>::remove_from_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             if (relinkey_size_leveled_.size() == 0)
             {
@@ -357,7 +391,7 @@ namespace heongpu
 
     void Relinkey<Scheme::CKKS>::remove_from_host()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -392,12 +426,14 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = context;
         scheme_ = context->scheme_;
-        key_type = context->keyswitching_type_;
 
         ring_size = context->n;
         Q_prime_size_ = context->Q_prime_size;
@@ -407,53 +443,21 @@ namespace heongpu
 
         group_order_ = 5;
 
-        switch (static_cast<int>(context->keyswitching_type_))
+        for (int i = 0; i < MAX_SHIFT; i++)
         {
-            case 1: // KEYSWITCHING_METHOD_I
-            {
-                galoiskey_size_ = 2 * Q_size_ * Q_prime_size_ * ring_size;
-
-                for (int i = 0; i < MAX_SHIFT; i++)
-                {
-                    int power = pow(2, i);
-                    galois_elt[power] =
-                        steps_to_galois_elt(power, ring_size, group_order_);
-                    galois_elt[(-power)] =
-                        steps_to_galois_elt((-power), ring_size, group_order_);
-                }
-
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-
-                max_shift_ = MAX_SHIFT - 1;
-                max_log_slot_ = int(std::log2(ring_size >> 1));
-            }
-            break;
-            case 2: // KEYSWITCHING_METHOD_II
-            {
-                for (int i = 0; i < MAX_SHIFT; i++)
-                {
-                    int power = pow(2, i);
-                    galois_elt[power] =
-                        steps_to_galois_elt(power, ring_size, group_order_);
-                    galois_elt[(-power)] =
-                        steps_to_galois_elt((-power), ring_size, group_order_);
-                }
-
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-
-                max_shift_ = MAX_SHIFT - 1;
-                max_log_slot_ = int(std::log2(ring_size >> 1));
-
-                d_ = context->d_leveled->operator[](0);
-                galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
+            int power = pow(2, i);
+            galois_elt[power] =
+                steps_to_galois_elt(power, ring_size, group_order_);
+            galois_elt[(-power)] =
+                steps_to_galois_elt((-power), ring_size, group_order_);
         }
+
+        galois_elt_zero = steps_to_galois_elt(0, ring_size, group_order_);
+
+        d_ = context->d_leveled->operator[](0);
+        galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
+
+        set_rotation_limits();
     }
 
     __host__ Galoiskey<Scheme::CKKS>::Galoiskey(HEContext<Scheme::CKKS> context,
@@ -461,12 +465,20 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
+        }
+        if (max_shift < 0)
+        {
+            throw ParameterError(error_message("Invalid Galoiskey max_shift ",
+                                               max_shift,
+                                               "! It must be at least 0."));
         }
 
         context_ = context;
         scheme_ = context->scheme_;
-        key_type = context->keyswitching_type_;
 
         ring_size = context->n;
         Q_prime_size_ = context->Q_prime_size;
@@ -476,53 +488,21 @@ namespace heongpu
 
         group_order_ = 5;
 
-        switch (static_cast<int>(context->keyswitching_type_))
+        for (int i = 0; i < max_shift + 1; i++)
         {
-            case 1: // KEYSWITCHING_METHOD_I
-            {
-                galoiskey_size_ = 2 * Q_size_ * Q_prime_size_ * ring_size;
-
-                for (int i = 0; i < max_shift + 1; i++)
-                {
-                    int power = pow(2, i);
-                    galois_elt[power] =
-                        steps_to_galois_elt(power, ring_size, group_order_);
-                    galois_elt[(-power)] =
-                        steps_to_galois_elt((-power), ring_size, group_order_);
-                }
-
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-
-                max_shift_ = max_shift;
-                max_log_slot_ = int(std::log2(ring_size >> 1));
-            }
-            break;
-            case 2: // KEYSWITCHING_METHOD_II
-            {
-                for (int i = 0; i < max_shift + 1; i++)
-                {
-                    int power = pow(2, i);
-                    galois_elt[power] =
-                        steps_to_galois_elt(power, ring_size, group_order_);
-                    galois_elt[(-power)] =
-                        steps_to_galois_elt((-power), ring_size, group_order_);
-                }
-
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-
-                max_shift_ = max_shift;
-                max_log_slot_ = int(std::log2(ring_size >> 1));
-
-                d_ = context->d_leveled->operator[](0);
-                galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
+            int power = pow(2, i);
+            galois_elt[power] =
+                steps_to_galois_elt(power, ring_size, group_order_);
+            galois_elt[(-power)] =
+                steps_to_galois_elt((-power), ring_size, group_order_);
         }
+
+        galois_elt_zero = steps_to_galois_elt(0, ring_size, group_order_);
+
+        d_ = context->d_leveled->operator[](0);
+        galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
+
+        set_rotation_limits();
     }
 
     __host__ Galoiskey<Scheme::CKKS>::Galoiskey(HEContext<Scheme::CKKS> context,
@@ -530,12 +510,14 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = context;
         scheme_ = context->scheme_;
-        key_type = context->keyswitching_type_;
 
         ring_size = context->n;
         Q_prime_size_ = context->Q_prime_size;
@@ -545,42 +527,18 @@ namespace heongpu
 
         group_order_ = 5;
 
-        switch (static_cast<int>(context->keyswitching_type_))
+        for (int shift : shift_vec)
         {
-            case 1: // KEYSWITCHING_METHOD_I
-            {
-                galoiskey_size_ = 2 * Q_size_ * Q_prime_size_ * ring_size;
-
-                for (int shift : shift_vec)
-                {
-                    galois_elt[shift] =
-                        steps_to_galois_elt(shift, ring_size, group_order_);
-                }
-
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-
-                break;
-            }
-            case 2: // KEYSWITCHING_METHOD_II
-            {
-                for (int shift : shift_vec)
-                {
-                    galois_elt[shift] =
-                        steps_to_galois_elt(shift, ring_size, group_order_);
-                }
-
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-
-                d_ = context->d_leveled->operator[](0);
-                galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
+            galois_elt[shift] =
+                steps_to_galois_elt(shift, ring_size, group_order_);
         }
+
+        galois_elt_zero = steps_to_galois_elt(0, ring_size, group_order_);
+
+        d_ = context->d_leveled->operator[](0);
+        galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
+
+        set_rotation_limits();
     }
 
     __host__
@@ -589,12 +547,14 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = context;
         scheme_ = context->scheme_;
-        key_type = context->keyswitching_type_;
 
         ring_size = context->n;
         Q_prime_size_ = context->Q_prime_size;
@@ -604,34 +564,31 @@ namespace heongpu
 
         group_order_ = 5;
 
-        switch (static_cast<int>(context->keyswitching_type_))
+        d_ = context->d_leveled->operator[](0);
+        galois_elt_zero = steps_to_galois_elt(0, ring_size, group_order_);
+        galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
+        custom_galois_elt = galois_elts;
+
+        set_rotation_limits();
+    }
+
+    void Galoiskey<Scheme::CKKS>::set_rotation_limits()
+    {
+        // A shift without its own key is split into the power of two steps
+        // 1, 2, 4, ..., 2^max_shift_ the key contains without a gap; larger
+        // steps are repeated from the largest one.
+        max_log_slot_ = int(std::log2(ring_size >> 1));
+        max_shift_ = -1;
+        while (max_shift_ + 1 < max_log_slot_ &&
+               galois_elt.count(1 << (max_shift_ + 1)) != 0)
         {
-            case 1: // KEYSWITCHING_METHOD_I
-            {
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-                galoiskey_size_ = 2 * Q_size_ * Q_prime_size_ * ring_size;
-                custom_galois_elt = galois_elts;
-            }
-            break;
-            case 2: // KEYSWITCHING_METHOD_II
-            {
-                d_ = context->d_leveled->operator[](0);
-                galois_elt_zero =
-                    steps_to_galois_elt(0, ring_size, group_order_);
-                galoiskey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
-                custom_galois_elt = galois_elts;
-            }
-            break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
+            max_shift_++;
         }
     }
 
     void Galoiskey<Scheme::CKKS>::store_in_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -646,17 +603,19 @@ namespace heongpu
             zero_device_location_ =
                 DeviceVector<Data64>(zero_host_location_, stream);
 
+            // The copies above read host memory until they finish.
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
             host_location_.clear();
             zero_host_location_.resize(0);
             zero_host_location_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Galoiskey<Scheme::CKKS>::store_in_host(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             for (auto& galois_ : device_location_)
             {
@@ -681,7 +640,7 @@ namespace heongpu
             device_location_.clear();
             zero_device_location_.resize(0);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -691,7 +650,7 @@ namespace heongpu
 
     Data64* Galoiskey<Scheme::CKKS>::data(size_t i)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             return device_location_[i].data();
         }
@@ -701,9 +660,21 @@ namespace heongpu
         }
     }
 
+    const Data64* Galoiskey<Scheme::CKKS>::data(size_t i) const
+    {
+        if (storage_type_ == storage_type::device)
+        {
+            return device_location_.at(i).data();
+        }
+        else
+        {
+            return host_location_.at(i).data();
+        }
+    }
+
     Data64* Galoiskey<Scheme::CKKS>::c_data()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             return zero_device_location_.data();
         }
@@ -713,13 +684,30 @@ namespace heongpu
         }
     }
 
-    void Galoiskey<Scheme::CKKS>::save(std::ostream& os) const
+    const Data64* Galoiskey<Scheme::CKKS>::c_data() const
+    {
+        if (storage_type_ == storage_type::device)
+        {
+            return zero_device_location_.data();
+        }
+        else
+        {
+            return zero_host_location_.data();
+        }
+    }
+
+    void Galoiskey<Scheme::CKKS>::save(std::ostream& os,
+                                       serialization_format format) const
     {
         if (galois_key_generated_)
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::galois_key, scheme_,
+                serialized_context_id());
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
-            os.write((char*) &key_type, sizeof(key_type));
+            detail::write_keyswitching_byte(os);
 
             os.write((char*) &ring_size, sizeof(ring_size));
 
@@ -761,7 +749,7 @@ namespace heongpu
 
             os.write((char*) &galoiskey_size_, sizeof(galoiskey_size_));
 
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 uint32_t key_count = device_location_.size();
                 os.write((char*) &key_count, sizeof(key_count));
@@ -820,14 +808,28 @@ namespace heongpu
     {
         if ((!galois_key_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::galois_key,
+                    scheme_type::ckks);
+            detail::validate_loaded_context_identity(
+                serialized_context_id(), loaded_context_id, "Galoiskey");
+            if (loaded_context_id != 0)
+            {
+                context_id_ = loaded_context_id;
+            }
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
             if (scheme_ != scheme_type::ckks)
             {
-                throw std::runtime_error("Invalid scheme binary!");
+                throw SerializationError(
+                    error_message("Invalid scheme binary! Expected CKKS data, "
+                                  "found scheme id ",
+                                  static_cast<int>(scheme_), "."));
             }
 
-            is.read((char*) &key_type, sizeof(key_type));
+            detail::read_keyswitching_byte(is, "Galoiskey");
 
             is.read((char*) &ring_size, sizeof(ring_size));
 
@@ -846,14 +848,18 @@ namespace heongpu
             is.read((char*) &galois_key_generated_,
                     sizeof(galois_key_generated_));
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
             galois_key_generated_ = true;
 
+            // A key made for a context lists the default shifts; the loaded
+            // key has its own.
+            galois_elt.clear();
+            custom_galois_elt.clear();
             if (customized)
             {
                 uint32_t custom_galois_elt_size;
                 is.read((char*) &custom_galois_elt_size,
-                        custom_galois_elt_size);
+                        sizeof(custom_galois_elt_size));
                 custom_galois_elt.resize(custom_galois_elt_size);
                 is.read((char*) custom_galois_elt.data(),
                         sizeof(uint32_t) * custom_galois_elt_size);
@@ -901,6 +907,8 @@ namespace heongpu
                        cudaMemcpyHostToDevice);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
             cudaDeviceSynchronize();
+
+            set_rotation_limits();
         }
         else
         {
@@ -932,55 +940,44 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = context;
         scheme_ = context->scheme_;
-        key_type = context->keyswitching_type_;
 
         ring_size = context->n;
         Q_prime_size_ = context->Q_prime_size;
         Q_size_ = context->Q_size;
 
-        switch (static_cast<int>(context->keyswitching_type_))
-        {
-            case 1: // KEYSWITCHING_METHOD_I
-            {
-                switchkey_size_ = 2 * Q_size_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            case 2: // KEYSWITCHING_METHOD_II
-            {
-                d_ = context->d_leveled->operator[](0);
-                switchkey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
-            }
-            break;
-            default:
-                throw std::invalid_argument("Invalid Key Switching Type");
-                break;
-        }
+        d_ = context->d_leveled->operator[](0);
+        switchkey_size_ = 2 * d_ * Q_prime_size_ * ring_size;
     }
 
     void Switchkey<Scheme::CKKS>::store_in_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
         else
         {
             device_location_ = DeviceVector<Data64>(host_location_, stream);
+            // The copies above read host memory until they finish.
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
             host_location_.resize(0);
             host_location_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Switchkey<Scheme::CKKS>::store_in_host(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             host_location_ = HostVector<Data64>(switchkey_size_);
             cudaMemcpyAsync(host_location_.data(), device_location_.data(),
@@ -990,7 +987,7 @@ namespace heongpu
 
             device_location_.resize(0, stream);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -1000,7 +997,7 @@ namespace heongpu
 
     Data64* Switchkey<Scheme::CKKS>::data()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             return device_location_.data();
         }
@@ -1010,13 +1007,30 @@ namespace heongpu
         }
     }
 
-    void Switchkey<Scheme::CKKS>::save(std::ostream& os) const
+    const Data64* Switchkey<Scheme::CKKS>::data() const
+    {
+        if (storage_type_ == storage_type::device)
+        {
+            return device_location_.data();
+        }
+        else
+        {
+            return host_location_.data();
+        }
+    }
+
+    void Switchkey<Scheme::CKKS>::save(std::ostream& os,
+                                       serialization_format format) const
     {
         if (switch_key_generated_)
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::switch_key, scheme_,
+                serialized_context_id());
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
-            os.write((char*) &key_type, sizeof(key_type));
+            detail::write_keyswitching_byte(os);
 
             os.write((char*) &ring_size, sizeof(ring_size));
 
@@ -1033,7 +1047,7 @@ namespace heongpu
 
             os.write((char*) &switchkey_size_, sizeof(switchkey_size_));
 
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 HostVector<Data64> host_locations_temp(switchkey_size_);
                 cudaMemcpy(host_locations_temp.data(), device_location_.data(),
@@ -1062,9 +1076,20 @@ namespace heongpu
     {
         if ((!switch_key_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::switch_key,
+                    scheme_type::ckks);
+            detail::validate_loaded_context_identity(
+                serialized_context_id(), loaded_context_id, "Switchkey");
+            if (loaded_context_id != 0)
+            {
+                context_id_ = loaded_context_id;
+            }
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
-            is.read((char*) &key_type, sizeof(key_type));
+            detail::read_keyswitching_byte(is, "Switchkey");
 
             is.read((char*) &ring_size, sizeof(ring_size));
 
@@ -1081,13 +1106,14 @@ namespace heongpu
 
             is.read((char*) &switchkey_size_, sizeof(switchkey_size_));
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
             switch_key_generated_ = true;
 
             HostVector<Data64> host_locations_temp(switchkey_size_);
             is.read((char*) host_locations_temp.data(),
                     sizeof(Data64) * switchkey_size_);
 
+            device_location_.resize(switchkey_size_);
             cudaMemcpy(device_location_.data(), host_locations_temp.data(),
                        switchkey_size_ * sizeof(Data64),
                        cudaMemcpyHostToDevice);
@@ -1100,9 +1126,9 @@ namespace heongpu
         }
     }
 
-    int Switchkey<Scheme::CKKS>::memory_size()
+    int Switchkey<Scheme::CKKS>::memory_size() const
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             return device_location_.size();
         }
@@ -1130,7 +1156,7 @@ namespace heongpu
     void Switchkey<Scheme::CKKS>::memory_set(
         DeviceVector<Data64>&& new_device_vector)
     {
-        storage_type_ = storage_type::DEVICE;
+        storage_type_ = storage_type::device;
         device_location_ = std::move(new_device_vector);
 
         if (host_location_.size() > 0)
@@ -1142,7 +1168,7 @@ namespace heongpu
 
     void Switchkey<Scheme::CKKS>::copy_to_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -1157,18 +1183,18 @@ namespace heongpu
                 device_location_ = DeviceVector<Data64>(host_location_, stream);
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Switchkey<Scheme::CKKS>::remove_from_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             device_location_.resize(0, stream);
             device_location_.shrink_to_fit(stream);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -1178,7 +1204,7 @@ namespace heongpu
 
     void Switchkey<Scheme::CKKS>::remove_from_host()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -1187,7 +1213,7 @@ namespace heongpu
             host_location_.resize(0);
             host_location_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 

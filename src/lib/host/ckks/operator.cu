@@ -1,10 +1,12 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
 #include <NTL/ZZ.h>
 #include <NTL/RR.h>
+#include <optional>
 #include <heongpu/host/ckks/operator.cuh>
 #include <heongpu/host/ckks/cosine_approx.cuh>
 
@@ -45,7 +47,10 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = std::move(context);
@@ -92,13 +97,306 @@ namespace heongpu
         special_ifft_roots_table_ = encoder.special_ifft_roots_table_;
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::add(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& input2,
-        Ciphertext<Scheme::CKKS>& output, const ExecutionOptions& options)
+    namespace
     {
+        // The ManualScope objects of this thread.
+        thread_local int manual_scopes = 0;
+
+        bool same_scale(double scale, double expected)
+        {
+            return std::abs(scale - expected) <= 1e-9 * expected;
+        }
+
+        // A copy of a ciphertext or plaintext runs on the stream of its
+        // source, after the work that wrote it. Makes stream wait for the
+        // work enqueued on source so far.
+        void wait_for(cudaStream_t stream, cudaStream_t source)
+        {
+            if (stream == source)
+            {
+                return;
+            }
+            cudaEvent_t copied;
+            HEONGPU_CUDA_CHECK(
+                cudaEventCreateWithFlags(&copied, cudaEventDisableTiming));
+            HEONGPU_CUDA_CHECK(cudaEventRecord(copied, source));
+            HEONGPU_CUDA_CHECK(cudaStreamWaitEvent(stream, copied, 0));
+            HEONGPU_CUDA_CHECK(cudaEventDestroy(copied));
+        }
+
+        // Copies input to output for the work of stream, which then uses and
+        // frees output.
+        void copy_to_stream(const Ciphertext<Scheme::CKKS>& input,
+                            Ciphertext<Scheme::CKKS>& output,
+                            cudaStream_t stream)
+        {
+            output = input;
+            wait_for(stream, input.stream());
+            output.switch_stream(stream);
+        }
+    } // namespace
+
+    HEOperator<Scheme::CKKS>::ManualScope::ManualScope()
+    {
+        manual_scopes++;
+    }
+
+    HEOperator<Scheme::CKKS>::ManualScope::~ManualScope()
+    {
+        manual_scopes--;
+    }
+
+    bool HEOperator<Scheme::CKKS>::automatic() const
+    {
+        return (context_->rescale_mode_ == rescale_mode::automatic) &&
+               !manual_only_ && (manual_scopes == 0);
+    }
+
+    bool HEOperator<Scheme::CKKS>::automatic_context() const
+    {
+        return (context_->rescale_mode_ == rescale_mode::automatic) &&
+               (manual_scopes == 0);
+    }
+
+    void
+    HEOperator<Scheme::CKKS>::check_bootstrapping_output(int output_level,
+                                                         double scale) const
+    {
+        if (!automatic_context())
+        {
+            return;
+        }
+        int top = context_->top_level_;
+        if ((top != output_level) || (context_->level_scales_[top] != scale))
+        {
+            throw ParameterError(error_message(
+                "The bootstrapping results have the level ", output_level,
+                " and the scale ", scale,
+                ", which the automatic rescale mode needs as its top level "
+                "and its scale; the context has the top level ",
+                top, " with the scale ", context_->level_scales_[top],
+                "! Call set_rescale_mode(rescale_mode::automatic, ", scale,
+                ", ", output_level, ")."));
+        }
+    }
+
+    void HEOperator<Scheme::CKKS>::require_manual(const char* operation) const
+    {
+        if (automatic_context())
+        {
+            throw StateError(error_message(
+                operation,
+                " does not support the automatic rescale mode! Use a context "
+                "in rescale_mode::manual."));
+        }
+    }
+
+    const Ciphertext<Scheme::CKKS>&
+    HEOperator<Scheme::CKKS>::rescaled(const Ciphertext<Scheme::CKKS>& input,
+                                       Ciphertext<Scheme::CKKS>& storage,
+                                       const ExecutionOptions& options)
+    {
+        if (!input.rescale_required_)
+        {
+            return input;
+        }
+        if (input.relinearization_required_)
+        {
+            throw StateError("The ciphertext needs a rescaling, which needs "
+                             "a relinearization first! Relinearize it.");
+        }
+        ManualScope manual;
+        if (&storage != &input)
+        {
+            copy_to_stream(input, storage, options.stream_);
+        }
+        rescale_inplace(storage, options);
+        return storage;
+    }
+
+    const Ciphertext<Scheme::CKKS>& HEOperator<Scheme::CKKS>::dropped(
+        const Ciphertext<Scheme::CKKS>& input, int depth,
+        Ciphertext<Scheme::CKKS>& storage, const ExecutionOptions& options)
+    {
+        if (input.depth_ == depth)
+        {
+            return input;
+        }
+        ManualScope manual;
+        if (&storage != &input)
+        {
+            copy_to_stream(input, storage, options.stream_);
+        }
+        while (storage.depth_ < depth - 1)
+        {
+            mod_drop_inplace(storage, options);
+        }
+
+        // Rescaling from the level above divides by its prime.
+        int level = context_->Q_size - 1 - depth;
+        check_top_level(level, "ciphertext");
+        double target = context_->level_scales_[level];
+        double prime =
+            static_cast<double>(context_->prime_vector_[level + 1].value);
+        scale_up(storage, std::round(target * prime / storage.scale_), storage,
+                 options);
+        storage.rescale_required_ = true;
+        rescale_inplace(storage, options);
+        // The integer leaves a relative difference of about 1 / prime.
+        storage.scale_ = target;
+        return storage;
+    }
+
+    void HEOperator<Scheme::CKKS>::check_top_level(int level,
+                                                   const char* operand) const
+    {
+        if (level > context_->top_level_)
+        {
+            throw LevelMismatchError(error_message(
+                "The ", operand, " at level ", level,
+                " is above the top level ", context_->top_level_,
+                " of the automatic rescale mode, which bootstrapping uses! "
+                "Encode messages at the top level, with "
+                "HEEncoder::encode(message)."));
+        }
+    }
+
+    void HEOperator<Scheme::CKKS>::check_level_scale(
+        const Ciphertext<Scheme::CKKS>& input) const
+    {
+        check_top_level(input.level(), "ciphertext");
+        double expected = context_->level_scales_[input.level()];
+        if (input.rescale_required_)
+        {
+            expected = expected * expected;
+        }
+        if (!same_scale(input.scale_, expected))
+        {
+            throw ParameterError(error_message(
+                "The ciphertext at level ", input.level(), " has the scale ",
+                input.scale_, ", the automatic rescale mode expects ", expected,
+                "! Encode messages without a scale, with "
+                "HEEncoder::encode(message) or encode(message, depth)."));
+        }
+    }
+
+    void HEOperator<Scheme::CKKS>::check_level_scale(
+        const Plaintext<Scheme::CKKS>& input) const
+    {
+        int level = context_->Q_size - 1 - input.depth_;
+        check_top_level(level, "plaintext");
+        double expected = context_->level_scales_[level];
+        if (!same_scale(input.scale_, expected))
+        {
+            throw ParameterError(error_message(
+                "The plaintext at depth ", input.depth_, " has the scale ",
+                input.scale_, ", the automatic rescale mode expects ", expected,
+                " at its level! Encode it with HEEncoder::encode(message, "
+                "depth) for the depth of the ciphertext."));
+        }
+    }
+
+    void HEOperator<Scheme::CKKS>::prepare(
+        const Ciphertext<Scheme::CKKS>*& input1,
+        const Ciphertext<Scheme::CKKS>*& input2,
+        Ciphertext<Scheme::CKKS>& storage1, Ciphertext<Scheme::CKKS>& storage2,
+        bool keep_rescale, const ExecutionOptions& options)
+    {
+        bool both_rescale = input1->rescale_required_ &&
+                            input2->rescale_required_ &&
+                            (input1->depth_ == input2->depth_);
+        if (!(keep_rescale && both_rescale))
+        {
+            input1 = &rescaled(*input1, storage1, options);
+            input2 = &rescaled(*input2, storage2, options);
+        }
+        if (input1->depth_ < input2->depth_)
+        {
+            input1 = &dropped(*input1, input2->depth_, storage1, options);
+        }
+        else if (input2->depth_ < input1->depth_)
+        {
+            input2 = &dropped(*input2, input1->depth_, storage2, options);
+        }
+        check_level_scale(*input1);
+        check_level_scale(*input2);
+    }
+
+    void
+    HEOperator<Scheme::CKKS>::prepare(const Ciphertext<Scheme::CKKS>*& input1,
+                                      const Plaintext<Scheme::CKKS>*& input2,
+                                      Ciphertext<Scheme::CKKS>& storage1,
+                                      Plaintext<Scheme::CKKS>& storage2,
+                                      const ExecutionOptions& options)
+    {
+        input1 = &rescaled(*input1, storage1, options);
+        if (input1->depth_ < input2->depth_)
+        {
+            input1 = &dropped(*input1, input2->depth_, storage1, options);
+        }
+        else if (input2->depth_ < input1->depth_)
+        {
+            ManualScope manual;
+            storage2 = *input2;
+            wait_for(options.stream_, input2->device_locations_.stream());
+            storage2.device_locations_.set_stream(options.stream_);
+            while (storage2.depth_ < input1->depth_)
+            {
+                mod_drop_inplace(storage2, options);
+            }
+            input2 = &storage2;
+        }
+        check_level_scale(*input1);
+        check_level_scale(*input2);
+    }
+
+    const Ciphertext<Scheme::CKKS>& HEOperator<Scheme::CKKS>::automatic_input(
+        const Ciphertext<Scheme::CKKS>& input,
+        Ciphertext<Scheme::CKKS>& storage, const ExecutionOptions& options)
+    {
+        if (!automatic())
+        {
+            return input;
+        }
+        const Ciphertext<Scheme::CKKS>& first =
+            rescaled(input, storage, options);
+        check_level_scale(first);
+        return first;
+    }
+
+    double HEOperator<Scheme::CKKS>::automatic_target(
+        const Ciphertext<Scheme::CKKS>& input, int depth) const
+    {
+        if (!automatic())
+        {
+            return 0.0;
+        }
+        return context_->level_scales_[input.level() - depth];
+    }
+
+    __host__ void
+    HEOperator<Scheme::CKKS>::add(const Ciphertext<Scheme::CKKS>& input1,
+                                  const Ciphertext<Scheme::CKKS>& input2,
+                                  Ciphertext<Scheme::CKKS>& output,
+                                  const ExecutionOptions& options)
+    {
+        if (run_automatic(input1, input2, true, options,
+                          [&](const Ciphertext<Scheme::CKKS>& first,
+                              const Ciphertext<Scheme::CKKS>& second)
+                          { add(first, second, output, options); }))
+        {
+            return;
+        }
+
+        input1.validate_context(context_);
+        input2.validate_context(context_);
+
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -129,7 +427,11 @@ namespace heongpu
             input2.memory_size() <
                 (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients per ciphertext, got ", input1.memory_size(),
+                " and ", input2.memory_size(), "."));
         }
 
         input_storage_manager(
@@ -160,6 +462,7 @@ namespace heongpu
                                 HEONGPU_CUDA_CHECK(cudaGetLastError());
 
                                 output_.scheme_ = context_->scheme_;
+                                output_.context_id_ = context_->context_id_;
                                 output_.ring_size_ = context_->n;
                                 output_.coeff_modulus_count_ = context_->Q_size;
                                 output_.cipher_size_ = cipher_size;
@@ -183,13 +486,29 @@ namespace heongpu
             options, (&input1 == &output));
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::sub(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& input2,
-        Ciphertext<Scheme::CKKS>& output, const ExecutionOptions& options)
+    __host__ void
+    HEOperator<Scheme::CKKS>::sub(const Ciphertext<Scheme::CKKS>& input1,
+                                  const Ciphertext<Scheme::CKKS>& input2,
+                                  Ciphertext<Scheme::CKKS>& output,
+                                  const ExecutionOptions& options)
     {
+        if (run_automatic(input1, input2, true, options,
+                          [&](const Ciphertext<Scheme::CKKS>& first,
+                              const Ciphertext<Scheme::CKKS>& second)
+                          { sub(first, second, output, options); }))
+        {
+            return;
+        }
+
+        input1.validate_context(context_);
+        input2.validate_context(context_);
+
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -220,7 +539,11 @@ namespace heongpu
             input2.memory_size() <
                 (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients per ciphertext, got ", input1.memory_size(),
+                " and ", input2.memory_size(), "."));
         }
 
         input_storage_manager(
@@ -251,6 +574,7 @@ namespace heongpu
                                 HEONGPU_CUDA_CHECK(cudaGetLastError());
 
                                 output_.scheme_ = context_->scheme_;
+                                output_.context_id_ = context_->context_id_;
                                 output_.ring_size_ = context_->n;
                                 output_.coeff_modulus_count_ = context_->Q_size;
                                 output_.cipher_size_ = cipher_size;
@@ -275,10 +599,12 @@ namespace heongpu
     }
 
     __host__ void
-    HEOperator<Scheme::CKKS>::negate(Ciphertext<Scheme::CKKS>& input1,
+    HEOperator<Scheme::CKKS>::negate(const Ciphertext<Scheme::CKKS>& input1,
                                      Ciphertext<Scheme::CKKS>& output,
                                      const ExecutionOptions& options)
     {
+        input1.validate_context(context_);
+
         int cipher_size = input1.relinearization_required_ ? 3 : 2;
 
         int current_decomp_count = context_->Q_size - input1.depth_;
@@ -286,7 +612,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         input_storage_manager(
@@ -309,12 +638,13 @@ namespace heongpu
                         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
                         output_.scheme_ = context_->scheme_;
+                        output_.context_id_ = context_->context_id_;
                         output_.ring_size_ = context_->n;
                         output_.coeff_modulus_count_ = context_->Q_size;
                         output_.cipher_size_ = cipher_size;
                         output_.depth_ = input1_.depth_;
                         output_.in_ntt_domain_ = input1_.in_ntt_domain_;
-                                output_.encoding_ = input1_.encoding_;
+                        output_.encoding_ = input1_.encoding_;
                         output_.scale_ = input1_.scale_;
                         output_.rescale_required_ = input1_.rescale_required_;
                         output_.relinearization_required_ =
@@ -334,7 +664,10 @@ namespace heongpu
     {
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -350,12 +683,18 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < (context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(
+                error_message("Invalid Plaintext size! Expected at least ",
+                              (context_->n * current_decomp_count),
+                              " coefficients, got ", input2.size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -379,7 +718,10 @@ namespace heongpu
     {
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -395,12 +737,18 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < (context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(
+                error_message("Invalid Plaintext size! Expected at least ",
+                              (context_->n * current_decomp_count),
+                              " coefficients, got ", input2.size(), "."));
         }
 
         addition<<<dim3((context_->n >> 8), current_decomp_count, 1), 256, 0,
@@ -420,7 +768,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -449,7 +800,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
@@ -466,7 +820,10 @@ namespace heongpu
     {
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -482,12 +839,18 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < (context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(
+                error_message("Invalid Plaintext size! Expected at least ",
+                              (context_->n * current_decomp_count),
+                              " coefficients, got ", input2.size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -511,7 +874,10 @@ namespace heongpu
     {
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -527,12 +893,18 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < (context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(
+                error_message("Invalid Plaintext size! Expected at least ",
+                              (context_->n * current_decomp_count),
+                              " coefficients, got ", input2.size(), "."));
         }
 
         substraction<<<dim3((context_->n >> 8), current_decomp_count, 1), 256,
@@ -553,7 +925,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -582,7 +957,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         substraction_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
@@ -593,7 +971,7 @@ namespace heongpu
         HEONGPU_CUDA_CHECK(cudaGetLastError());
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::add_constant_plain_ckks_v2(
+    __host__ void HEOperator<Scheme::CKKS>::add_constant_plain_complex_ckks(
         Ciphertext<Scheme::CKKS>& input1, Complex64 c,
         Ciphertext<Scheme::CKKS>& output, const cudaStream_t stream)
     {
@@ -603,7 +981,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -644,8 +1025,8 @@ namespace heongpu
             imag_rns_host[i] = u64_from_zz(imag_mod);
         }
 
-        DeviceVector<Data64> real_rns = DeviceVector<Data64>(real_rns_host);
-        DeviceVector<Data64> imag_rns = DeviceVector<Data64>(imag_rns_host);
+        DeviceVector<Data64> real_rns(real_rns_host, stream);
+        DeviceVector<Data64> imag_rns(imag_rns_host, stream);
 
         cipher_add_by_gaussian_integer_kernel<<<
             dim3((context_->n >> 8), current_decomp_count, cipher_size), 256, 0,
@@ -657,7 +1038,7 @@ namespace heongpu
         output.memory_set(std::move(output_memory));
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::multiply_const_plain_ckks_v2(
+    __host__ void HEOperator<Scheme::CKKS>::multiply_const_plain_complex_ckks(
         Ciphertext<Scheme::CKKS>& input1, Complex64 c,
         Ciphertext<Scheme::CKKS>& output, const cudaStream_t stream)
     {
@@ -667,7 +1048,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -736,8 +1120,8 @@ namespace heongpu
             imag_rns_host[i] = u64_from_zz(imag_mod);
         }
 
-        DeviceVector<Data64> real_rns = DeviceVector<Data64>(real_rns_host);
-        DeviceVector<Data64> imag_rns = DeviceVector<Data64>(imag_rns_host);
+        DeviceVector<Data64> real_rns(real_rns_host, stream);
+        DeviceVector<Data64> imag_rns(imag_rns_host, stream);
 
         cipher_mult_by_gaussian_integer_kernel<<<
             dim3((context_->n >> 8), current_decomp_count, cipher_size), 256, 0,
@@ -759,7 +1143,7 @@ namespace heongpu
 
         // Multiply by the scale constant (as a real number, no imaginary part)
         Complex64 scale_complex(scale_double, 0.0);
-        multiply_const_plain_ckks_v2(input, scale_complex, output, stream);
+        multiply_const_plain_complex_ckks(input, scale_complex, output, stream);
 
         // Set scale to input.scale * scale (using original scale, not
         // scale_uint)
@@ -777,7 +1161,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -804,7 +1191,10 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * current_decomp_count),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -826,7 +1216,10 @@ namespace heongpu
     {
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -840,7 +1233,11 @@ namespace heongpu
         if (input1.memory_size() < (2 * context_->n * current_decomp_count) ||
             input2.memory_size() < (2 * context_->n * current_decomp_count))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (2 * context_->n * current_decomp_count),
+                " coefficients per ciphertext, got ", input1.memory_size(),
+                " and ", input2.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -869,7 +1266,10 @@ namespace heongpu
     {
         if (input1.depth_ != input2.depth_)
         {
-            throw std::logic_error("Ciphertexts leveled are not equal");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled are not equal (depth ", input1.depth_,
+                " and ", input2.depth_,
+                ")! Use mod_drop to bring both operands to the same depth."));
         }
 
         if (input1.encoding_ != input2.encoding_)
@@ -924,135 +1324,9 @@ namespace heongpu
     }
 
     __host__ void
-    HEOperator<Scheme::CKKS>::relinearize_seal_method_inplace_ckks(
-        Ciphertext<Scheme::CKKS>& input1, Relinkey<Scheme::CKKS>& relin_key,
-        const cudaStream_t stream)
-    {
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
-
-        int first_decomp_count = context_->Q_size;
-        int current_decomp_count = context_->Q_size - input1.depth_;
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT_Inplace(
-            input1.data() + (current_decomp_count << (context_->n_power + 1)),
-            context_->intt_table_->data(), context_->modulus_->data(), cfg_intt,
-            current_decomp_count, current_decomp_count);
-
-        DeviceVector<Data64> temp_relin(
-            (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-        Data64* temp1_relin = temp_relin.data();
-        Data64* temp2_relin = temp1_relin + (context_->n * context_->Q_size *
-                                             context_->Q_prime_size);
-
-        cipher_broadcast_leveled_kernel<<<dim3((context_->n >> 8),
-                                               current_decomp_count, 1),
-                                          256, 0, stream>>>(
-            input1.data() + (current_decomp_count << (context_->n_power + 1)),
-            temp1_relin, context_->modulus_->data(), first_rns_mod_count,
-            current_rns_mod_count, context_->n_power);
-
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
-        int location = 0;
-        for (int i = 0; i < input1.depth_; i++)
-        {
-            location += counter;
-            counter--;
-        }
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp1_relin, context_->ntt_table_->data(),
-            context_->modulus_->data(), cfg_ntt,
-            current_decomp_count * current_rns_mod_count, current_rns_mod_count,
-            new_prime_locations + location);
-
-        // TODO: make it efficient
-        int iteration_count_1 = current_decomp_count / 4;
-        int iteration_count_2 = current_decomp_count % 4;
-        if (relin_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp1_relin, relin_key.data(), temp2_relin,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, iteration_count_1,
-                          iteration_count_2, context_->n_power);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(relin_key.host_location_, stream);
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp1_relin, key_location.data(), temp2_relin,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, iteration_count_1,
-                          iteration_count_2, context_->n_power);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt2 = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data() + first_decomp_count,
-            .stream = stream};
-
-        gpuntt::GPU_NTT_Poly_Ordered_Inplace(
-            temp2_relin,
-            context_->intt_table_->data() +
-                (first_decomp_count << context_->n_power),
-            context_->modulus_->data() + first_decomp_count, cfg_intt2, 2, 1,
-            new_input_locations + (input1.depth_ * 2));
-
-        divide_round_lastq_leveled_stage_one_kernel<<<
-            dim3((context_->n >> 8), 2, 1), 256, 0, stream>>>(
-            temp2_relin, temp1_relin, context_->modulus_->data(),
-            context_->half_p_->data(), context_->half_mod_->data(),
-            context_->n_power, first_decomp_count, current_decomp_count);
-
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(temp1_relin, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * current_decomp_count, current_decomp_count);
-
-        divide_round_lastq_leveled_stage_two_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            stream>>>(temp1_relin, temp2_relin, input1.data(), input1.data(),
-                      context_->modulus_->data(),
-                      context_->last_q_modinv_->data(), context_->n_power,
-                      current_decomp_count);
-
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-    }
-
-    __host__ void
-    HEOperator<Scheme::CKKS>::relinearize_external_product_method2_inplace_ckks(
-        Ciphertext<Scheme::CKKS>& input1, Relinkey<Scheme::CKKS>& relin_key,
-        const cudaStream_t stream)
+    HEOperator<Scheme::CKKS>::relinearize_external_product_inplace_ckks(
+        Ciphertext<Scheme::CKKS>& input1,
+        const Relinkey<Scheme::CKKS>& relin_key, const cudaStream_t stream)
     {
         int first_rns_mod_count = context_->Q_prime_size;
         int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
@@ -1090,26 +1364,9 @@ namespace heongpu
         Data64* temp2_relin = temp1_relin + (context_->n * context_->Q_size *
                                              context_->Q_prime_size);
 
-        base_conversion_DtoQtilde_relin_leveled_kernel<<<
-            dim3((context_->n >> 8),
-                 context_->d_leveled->operator[](input1.depth_), 1),
-            256, 0, stream>>>(
+        decompose_to_Qtilde(
             input1.data() + (current_decomp_count << (context_->n_power + 1)),
-            temp1_relin, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Qtilda_leveled
-                ->
-                operator[](input1.depth_)
-                .data(),
-            context_->Mi_inv_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->prod_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->I_j_leveled->operator[](input1.depth_).data(),
-            context_->I_location_leveled->operator[](input1.depth_).data(),
-            context_->n_power, context_->d_leveled->operator[](input1.depth_),
-            current_rns_mod_count, current_decomp_count, input1.depth_,
-            context_->prime_location_leveled->data() + location);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+            temp1_relin, input1.depth_, stream);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
             .n_power = context_->n_power,
@@ -1131,9 +1388,9 @@ namespace heongpu
             context_->d_leveled->operator[](input1.depth_) / 4;
         int iteration_count_2 =
             context_->d_leveled->operator[](input1.depth_) % 4;
-        if (relin_key.storage_type_ == storage_type::DEVICE)
+        if (relin_key.storage_type_ == storage_type::device)
         {
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
                 stream>>>(temp1_relin, relin_key.data(), temp2_relin,
                           context_->modulus_->data(), first_rns_mod_count,
@@ -1145,7 +1402,7 @@ namespace heongpu
         else
         {
             DeviceVector<Data64> key_location(relin_key.host_location_, stream);
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
                 stream>>>(temp1_relin, key_location.data(), temp2_relin,
                           context_->modulus_->data(), first_rns_mod_count,
@@ -1153,6 +1410,48 @@ namespace heongpu
                           iteration_count_1, iteration_count_2, input1.depth_,
                           context_->n_power);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
+        }
+
+        if (context_->P_size == 1)
+        {
+            // ModDown in the NTT domain: only the P part is transformed back.
+            gpuntt::ntt_rns_configuration<Data64> cfg_intt_p = {
+                .n_power = context_->n_power,
+                .ntt_type = gpuntt::INVERSE,
+                .ntt_layout = gpuntt::PerPolynomial,
+                .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
+                .zero_padding = false,
+                .mod_inverse =
+                    context_->n_inverse_->data() + first_decomp_count,
+                .stream = stream};
+
+            gpuntt::GPU_NTT_Poly_Ordered_Inplace(
+                temp2_relin,
+                context_->intt_table_->data() +
+                    (first_decomp_count << context_->n_power),
+                context_->modulus_->data() + first_decomp_count, cfg_intt_p, 2,
+                1, new_input_locations + (input1.depth_ * 2));
+
+            divide_round_lastq_leveled_stage_one_kernel<<<
+                dim3((context_->n >> 8), 2, 1), 256, 0, stream>>>(
+                temp2_relin, temp1_relin, context_->modulus_->data(),
+                context_->half_p_->data(), context_->half_mod_->data(),
+                context_->n_power, first_decomp_count, current_decomp_count);
+            HEONGPU_CUDA_CHECK(cudaGetLastError());
+
+            gpuntt::GPU_NTT_Inplace(temp1_relin, context_->ntt_table_->data(),
+                                    context_->modulus_->data(), cfg_ntt,
+                                    2 * current_decomp_count,
+                                    current_decomp_count);
+
+            divide_round_lastq_leveled_stage_two_kernel<<<
+                dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
+                stream>>>(temp1_relin, temp2_relin, input1.data(),
+                          input1.data(), context_->modulus_->data(),
+                          context_->last_q_modinv_->data(), context_->n_power,
+                          current_decomp_count);
+            HEONGPU_CUDA_CHECK(cudaGetLastError());
+            return;
         }
 
         gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
@@ -1362,321 +1661,278 @@ namespace heongpu
         input1.depth_++;
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::rotate_ckks_method_I(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Galoiskey<Scheme::CKKS>& galois_key, int shift,
-        const cudaStream_t stream)
+    __host__ void HEOperator<Scheme::CKKS>::decompose_to_Qtilde(
+        Data64* input, Data64* output, int depth, cudaStream_t stream)
     {
-        int galoiselt =
-            steps_to_galois_elt(shift, context_->n, galois_key.group_order_);
-        bool key_exist = (galois_key.storage_type_ == storage_type::DEVICE)
-                             ? (galois_key.device_location_.find(galoiselt) !=
-                                galois_key.device_location_.end())
-                             : (galois_key.host_location_.find(galoiselt) !=
-                                galois_key.host_location_.end());
-        if (key_exist)
+        int current_decomp_count = context_->Q_size - depth;
+        int current_rns_mod_count = context_->Q_prime_size - depth;
+        int d = context_->d_leveled->operator[](depth);
+
+        if (context_->P_size == 1)
         {
-            apply_galois_ckks_method_I(input1, output, galois_key, galoiselt,
-                                       stream);
-        }
-        else
-        {
-            std::vector<int> indexs = rotation_index_generator(
-                shift, galois_key.max_log_slot_, galois_key.max_shift_);
-            std::vector<int> required_galoiselt;
-            for (int index : indexs)
-            {
-                if (!(galois_key.galois_elt.find(index) !=
-                      galois_key.galois_elt.end()))
-                {
-                    throw std::logic_error("Galois key not present!");
-                }
-                required_galoiselt.push_back(galois_key.galois_elt[index]);
-            }
-
-            Ciphertext<Scheme::CKKS>* current_input = &input1;
-            for (auto& galois_elt : required_galoiselt)
-            {
-                apply_galois_ckks_method_I(*current_input, output, galois_key,
-                                           galois_elt, stream);
-                current_input = &output;
-            }
-        }
-    }
-
-    __host__ void HEOperator<Scheme::CKKS>::rotate_ckks_method_II(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Galoiskey<Scheme::CKKS>& galois_key, int shift,
-        const cudaStream_t stream)
-    {
-        int galoiselt =
-            steps_to_galois_elt(shift, context_->n, galois_key.group_order_);
-        bool key_exist = (galois_key.storage_type_ == storage_type::DEVICE)
-                             ? (galois_key.device_location_.find(galoiselt) !=
-                                galois_key.device_location_.end())
-                             : (galois_key.host_location_.find(galoiselt) !=
-                                galois_key.host_location_.end());
-        if (key_exist)
-        {
-            apply_galois_ckks_method_II(input1, output, galois_key, galoiselt,
-                                        stream);
-        }
-        else
-        {
-            std::vector<int> indexs = rotation_index_generator(
-                shift, galois_key.max_log_slot_, galois_key.max_shift_);
-            std::vector<int> required_galoiselt;
-            for (int index : indexs)
-            {
-                if (!(galois_key.galois_elt.find(index) !=
-                      galois_key.galois_elt.end()))
-                {
-                    throw std::logic_error("Galois key not present!");
-                }
-                required_galoiselt.push_back(galois_key.galois_elt[index]);
-            }
-
-            Ciphertext<Scheme::CKKS>* current_input = &input1;
-            for (auto& galois_elt : required_galoiselt)
-            {
-                apply_galois_ckks_method_II(*current_input, output, galois_key,
-                                            galois_elt, stream);
-                current_input = &output;
-            }
-        }
-    }
-
-    __host__ void HEOperator<Scheme::CKKS>::apply_galois_ckks_method_I(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Galoiskey<Scheme::CKKS>& galois_key, int galois_elt,
-        const cudaStream_t stream)
-    {
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
-
-        int first_decomp_count = context_->Q_size;
-        int current_decomp_count = context_->Q_size - input1.depth_;
-
-        DeviceVector<Data64> output_memory(
-            (2 * context_->n * current_decomp_count), stream);
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT(input1.data(), temp0_rotation,
-                         context_->intt_table_->data(),
-                         context_->modulus_->data(), cfg_intt,
-                         2 * current_decomp_count, current_decomp_count);
-
-        // TODO: make it efficient
-        ckks_duplicate_kernel<<<dim3((context_->n >> 8), current_decomp_count,
-                                     1),
-                                256, 0, stream>>>(
-            temp0_rotation, temp2_rotation, context_->modulus_->data(),
-            context_->n_power, first_rns_mod_count, current_rns_mod_count,
-            current_decomp_count);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
-        int location = 0;
-        for (int i = 0; i < input1.depth_; i++)
-        {
-            location += counter;
-            counter--;
-        }
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp2_rotation, context_->ntt_table_->data(),
-            context_->modulus_->data(), cfg_ntt,
-            current_decomp_count * current_rns_mod_count, current_rns_mod_count,
-            new_prime_locations + location);
-
-        // MultSum
-        // TODO: make it efficient
-        int iteration_count_1 = current_decomp_count / 4;
-        int iteration_count_2 = current_decomp_count % 4;
-        if (galois_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(
-                temp2_rotation, galois_key.device_location_[galois_elt].data(),
-                temp3_rotation, context_->modulus_->data(), first_rns_mod_count,
-                current_decomp_count, iteration_count_1, iteration_count_2,
-                context_->n_power);
+            // Every digit is one prime.
+            single_prime_digits_to_Qtilde_kernel<<<
+                dim3((context_->n >> 8), d, 1), 256, 0, stream>>>(
+                input, output, context_->modulus_->data(), context_->n_power,
+                current_rns_mod_count, current_decomp_count, depth);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(
-                galois_key.host_location_[galois_elt], stream);
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp2_rotation, key_location.data(), temp3_rotation,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, iteration_count_1,
-                          iteration_count_2, context_->n_power);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
+            return;
         }
 
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp3_rotation, context_->intt_table_->data(),
-            context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
-            current_rns_mod_count, new_prime_locations + location);
-
-        // ModDown + Permute
-        divide_round_lastq_permute_ckks_kernel<<<dim3((context_->n >> 8),
-                                                      current_decomp_count, 2),
-                                                 256, 0, stream>>>(
-            temp3_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            galois_elt, context_->n_power, current_rns_mod_count,
-            current_decomp_count, first_rns_mod_count, first_decomp_count,
-            context_->P_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(output_memory.data(),
-                                context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * current_decomp_count, current_decomp_count);
-
-        output.memory_set(std::move(output_memory));
-
-        output.scheme_ = context_->scheme_;
-        output.ring_size_ = context_->n;
-        output.coeff_modulus_count_ = context_->Q_size;
-        output.cipher_size_ = 2;
-        output.depth_ = input1.depth_;
-        output.scale_ = input1.scale_;
-        output.in_ntt_domain_ = input1.in_ntt_domain_;
-        output.encoding_ = input1.encoding_;
-        output.rescale_required_ = input1.rescale_required_;
-        output.relinearization_required_ = input1.relinearization_required_;
-        output.ciphertext_generated_ = true;
-    }
-
-    __host__ void HEOperator<Scheme::CKKS>::apply_galois_ckks_method_II(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Galoiskey<Scheme::CKKS>& galois_key, int galois_elt,
-        const cudaStream_t stream)
-    {
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
-
-        int first_decomp_count = context_->Q_size;
-        int current_decomp_count = context_->Q_size - input1.depth_;
-
-        DeviceVector<Data64> output_memory(
-            (2 * context_->n * current_decomp_count), stream);
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size) +
-                (2 * context_->n * context_->d_leveled->operator[](0) *
-                 context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation + (context_->n * context_->Q_size);
-        Data64* temp4_rotation =
-            temp3_rotation +
-            (2 * context_->n * context_->d_leveled->operator[](0) *
-             context_->Q_prime_size);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT(input1.data(), temp0_rotation,
-                         context_->intt_table_->data(),
-                         context_->modulus_->data(), cfg_intt,
-                         2 * current_decomp_count, current_decomp_count);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
+        int counter = context_->Q_prime_size;
         int location = 0;
-        for (int i = 0; i < input1.depth_; i++)
+        for (int i = 0; i < depth; i++)
         {
             location += counter;
             counter--;
         }
 
         base_conversion_DtoQtilde_relin_leveled_kernel<<<
-            dim3((context_->n >> 8),
-                 context_->d_leveled->operator[](input1.depth_), 1),
-            256, 0, stream>>>(
-            temp0_rotation + (current_decomp_count << context_->n_power),
-            temp3_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Qtilda_leveled
-                ->
-                operator[](input1.depth_)
+            dim3((context_->n >> 8), d, 1), 256, 0, stream>>>(
+            input, output, context_->modulus_->data(),
+            context_->base_change_matrix_D_to_Qtilda_leveled->operator[](depth)
                 .data(),
-            context_->Mi_inv_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->prod_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->I_j_leveled->operator[](input1.depth_).data(),
-            context_->I_location_leveled->operator[](input1.depth_).data(),
-            context_->n_power, context_->d_leveled->operator[](input1.depth_),
-            current_rns_mod_count, current_decomp_count, input1.depth_,
-            context_->prime_location_leveled->data() + location);
+            context_->Mi_inv_D_to_Qtilda_leveled->operator[](depth).data(),
+            context_->prod_D_to_Qtilda_leveled->operator[](depth).data(),
+            context_->I_j_leveled->operator[](depth).data(),
+            context_->I_location_leveled->operator[](depth).data(),
+            context_->n_power, d, current_rns_mod_count, current_decomp_count,
+            depth, context_->prime_location_leveled->data() + location);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
+    }
+
+    __host__ void HEOperator<Scheme::CKKS>::rotate_ckks(
+        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
+        const Galoiskey<Scheme::CKKS>& galois_key, int shift,
+        const cudaStream_t stream)
+    {
+        int galoiselt =
+            steps_to_galois_elt(shift, context_->n, galois_key.group_order_);
+        bool key_exist = (galois_key.storage_type_ == storage_type::device)
+                             ? (galois_key.device_location_.find(galoiselt) !=
+                                galois_key.device_location_.end())
+                             : (galois_key.host_location_.find(galoiselt) !=
+                                galois_key.host_location_.end());
+        if (key_exist)
+        {
+            apply_galois_ckks(input1, output, galois_key, galoiselt, stream);
+        }
+        else
+        {
+            std::vector<int> indexs = rotation_index_generator(
+                shift, galois_key.max_log_slot_, galois_key.max_shift_);
+            if (indexs.empty())
+            {
+                if (shift % (context_->n >> 1) == 0)
+                {
+                    // A multiple of the slot count does not move the slots.
+                    output = input1;
+                    return;
+                }
+                throw KeyNotFoundError(error_message(
+                    "Galois key not present for shift ", shift,
+                    "! The Galoiskey has neither a key for this shift nor the "
+                    "power of two keys to build it from."));
+            }
+            std::vector<int> required_galoiselt;
+            for (int index : indexs)
+            {
+                if (!(galois_key.galois_elt.find(index) !=
+                      galois_key.galois_elt.end()))
+                {
+                    throw KeyNotFoundError(error_message(
+                        "Galois key not present for rotation step ", index,
+                        " (needed for shift ", shift,
+                        ")! Generate the Galoiskey with this shift."));
+                }
+                required_galoiselt.push_back(galois_key.galois_elt.at(index));
+            }
+
+            Ciphertext<Scheme::CKKS>* current_input = &input1;
+            for (auto& galois_elt : required_galoiselt)
+            {
+                apply_galois_ckks(*current_input, output, galois_key,
+                                  galois_elt, stream);
+                current_input = &output;
+            }
+        }
+    }
+
+    __host__ std::vector<Ciphertext<Scheme::CKKS>>
+    HEOperator<Scheme::CKKS>::rotate_hoisted(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const std::vector<int>& shifts, const ExecutionOptions& options)
+    {
+        std::vector<Ciphertext<Scheme::CKKS>> rotated;
+        if (run_automatic(input1, options,
+                          [&](const Ciphertext<Scheme::CKKS>& first) {
+                              rotated = rotate_hoisted(first, galois_key,
+                                                       shifts, options);
+                          }))
+        {
+            return rotated;
+        }
+
+        input1.validate_context(context_);
+        galois_key.validate_context(context_);
+
+        if (input1.rescale_required_ || input1.relinearization_required_)
+        {
+            throw StateError(error_message("Ciphertext can not be rotated! ",
+                                           input1.relinearization_required_
+                                               ? "Relinearize it first."
+                                               : "Rescale it first."));
+        }
+
+        int current_decomp_count = context_->Q_size - input1.depth_;
+
+        if (input1.memory_size() < (2 * context_->n * current_decomp_count))
+        {
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (2 * context_->n * current_decomp_count), " coefficients, got ",
+                input1.memory_size(), "."));
+        }
+
+        auto has_key = [&](int galois_elt)
+        {
+            return (galois_key.storage_type_ == storage_type::device)
+                       ? (galois_key.device_location_.find(galois_elt) !=
+                          galois_key.device_location_.end())
+                       : (galois_key.host_location_.find(galois_elt) !=
+                          galois_key.host_location_.end());
+        };
+
+        std::vector<Ciphertext<Scheme::CKKS>> results;
+        results.reserve(shifts.size());
+        input_storage_manager(
+            input1,
+            [&](Ciphertext<Scheme::CKKS>& input1_)
+            {
+                std::optional<GaloisDecomposition> decomposition;
+                for (int shift : shifts)
+                {
+                    Ciphertext<Scheme::CKKS> output(context_, options);
+                    // Rotating by a multiple of the row size gives the input.
+                    shift %= (context_->n >> 1);
+                    int galois_elt =
+                        (shift == 0)
+                            ? 0
+                            : steps_to_galois_elt(shift, context_->n,
+                                                  galois_key.group_order_);
+                    if (shift == 0)
+                    {
+                        output = input1;
+                    }
+                    else if (has_key(galois_elt))
+                    {
+                        if (!decomposition)
+                        {
+                            decomposition =
+                                decompose_for_galois(input1_, options.stream_);
+                        }
+                        output_storage_manager(
+                            output,
+                            [&](Ciphertext<Scheme::CKKS>& output_)
+                            {
+                                apply_galois_decomposed(
+                                    input1_, *decomposition, output_,
+                                    galois_key, galois_elt, options.stream_);
+                            },
+                            options);
+                    }
+                    else
+                    {
+                        rotate(input1_, output, galois_key, shift, options);
+                    }
+                    results.push_back(std::move(output));
+                }
+            },
+            options, false);
+        return results;
+    }
+
+    __host__ HEOperator<Scheme::CKKS>::GaloisDecomposition
+    HEOperator<Scheme::CKKS>::decompose_for_galois(
+        Ciphertext<Scheme::CKKS>& input1, const cudaStream_t stream)
+    {
+        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
+        int current_decomp_count = context_->Q_size - input1.depth_;
+        int d = context_->d_leveled->operator[](input1.depth_);
+
+        GaloisDecomposition decomposition{
+            DeviceVector<Data64>(2 * context_->n * current_decomp_count,
+                                 stream),
+            DeviceVector<Data64>(context_->n * d * current_rns_mod_count,
+                                 stream)};
+
+        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
+            .n_power = context_->n_power,
+            .ntt_type = gpuntt::INVERSE,
+            .ntt_layout = gpuntt::PerPolynomial,
+            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
+            .zero_padding = false,
+            .mod_inverse = context_->n_inverse_->data(),
+            .stream = stream};
+
+        gpuntt::GPU_INTT(input1.data(), decomposition.coefficients.data(),
+                         context_->intt_table_->data(),
+                         context_->modulus_->data(), cfg_intt,
+                         2 * current_decomp_count, current_decomp_count);
+
+        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
+            .n_power = context_->n_power,
+            .ntt_type = gpuntt::FORWARD,
+            .ntt_layout = gpuntt::PerPolynomial,
+            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
+            .zero_padding = false,
+            .stream = stream};
+
+        int counter = context_->Q_prime_size;
+        int location = 0;
+        for (int i = 0; i < input1.depth_; i++)
+        {
+            location += counter;
+            counter--;
+        }
+
+        decompose_to_Qtilde(decomposition.coefficients.data() +
+                                (current_decomp_count << context_->n_power),
+                            decomposition.digits.data(), input1.depth_, stream);
 
         gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp3_rotation, context_->ntt_table_->data(),
-            context_->modulus_->data(), cfg_ntt,
-            context_->d_leveled->operator[](input1.depth_) *
-                current_rns_mod_count,
+            decomposition.digits.data(), context_->ntt_table_->data(),
+            context_->modulus_->data(), cfg_ntt, d * current_rns_mod_count,
             current_rns_mod_count, new_prime_locations + location);
+
+        return decomposition;
+    }
+
+    __host__ void HEOperator<Scheme::CKKS>::apply_galois_decomposed(
+        Ciphertext<Scheme::CKKS>& input1, GaloisDecomposition& decomposition,
+        Ciphertext<Scheme::CKKS>& output,
+        const Galoiskey<Scheme::CKKS>& galois_key, int galois_elt,
+        const cudaStream_t stream)
+    {
+        int first_rns_mod_count = context_->Q_prime_size;
+        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
+
+        int first_decomp_count = context_->Q_size;
+        int current_decomp_count = context_->Q_size - input1.depth_;
+
+        DeviceVector<Data64> output_memory(
+            (2 * context_->n * current_decomp_count), stream);
+        DeviceVector<Data64> key_switched(
+            2 * context_->n * current_rns_mod_count, stream);
+
+        int counter = first_rns_mod_count;
+        int location = 0;
+        for (int i = 0; i < input1.depth_; i++)
+        {
+            location += counter;
+            counter--;
+        }
 
         // MultSum
         // TODO: make it efficient
@@ -1684,96 +1940,31 @@ namespace heongpu
             context_->d_leveled->operator[](input1.depth_) / 4;
         int iteration_count_2 =
             context_->d_leveled->operator[](input1.depth_) % 4;
-        if (galois_key.storage_type_ == storage_type::DEVICE)
+        if (galois_key.storage_type_ == storage_type::device)
         {
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(
-                temp3_rotation, galois_key.device_location_[galois_elt].data(),
-                temp4_rotation, context_->modulus_->data(), first_rns_mod_count,
-                current_decomp_count, current_rns_mod_count, iteration_count_1,
-                iteration_count_2, input1.depth_, context_->n_power);
+                stream>>>(decomposition.digits.data(),
+                          galois_key.device_location_.at(galois_elt).data(),
+                          key_switched.data(), context_->modulus_->data(),
+                          first_rns_mod_count, current_decomp_count,
+                          current_rns_mod_count, iteration_count_1,
+                          iteration_count_2, input1.depth_, context_->n_power);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
         else
         {
             DeviceVector<Data64> key_location(
-                galois_key.host_location_[galois_elt], stream);
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+                galois_key.host_location_.at(galois_elt), stream);
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp3_rotation, key_location.data(), temp4_rotation,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, current_rns_mod_count,
-                          iteration_count_1, iteration_count_2, input1.depth_,
-                          context_->n_power);
+                stream>>>(decomposition.digits.data(), key_location.data(),
+                          key_switched.data(), context_->modulus_->data(),
+                          first_rns_mod_count, current_decomp_count,
+                          current_rns_mod_count, iteration_count_1,
+                          iteration_count_2, input1.depth_, context_->n_power);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
-
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp4_rotation, context_->intt_table_->data(),
-            context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
-            current_rns_mod_count, new_prime_locations + location);
-
-        // ModDown + Permute
-        divide_round_lastq_permute_ckks_kernel<<<dim3((context_->n >> 8),
-                                                      current_decomp_count, 2),
-                                                 256, 0, stream>>>(
-            temp4_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            galois_elt, context_->n_power, current_rns_mod_count,
-            current_decomp_count, first_rns_mod_count, first_decomp_count,
-            context_->P_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(output_memory.data(),
-                                context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * current_decomp_count, current_decomp_count);
-
-        output.memory_set(std::move(output_memory));
-
-        output.scheme_ = context_->scheme_;
-        output.ring_size_ = context_->n;
-        output.coeff_modulus_count_ = context_->Q_size;
-        output.cipher_size_ = 2;
-        output.depth_ = input1.depth_;
-        output.scale_ = input1.scale_;
-        output.in_ntt_domain_ = input1.in_ntt_domain_;
-        output.encoding_ = input1.encoding_;
-        output.rescale_required_ = input1.rescale_required_;
-        output.relinearization_required_ = input1.relinearization_required_;
-        output.ciphertext_generated_ = true;
-    }
-
-    __host__ void HEOperator<Scheme::CKKS>::switchkey_ckks_method_I(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Switchkey<Scheme::CKKS>& switch_key, const cudaStream_t stream)
-    {
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
-
-        int first_decomp_count = context_->Q_size;
-        int current_decomp_count = context_->Q_size - input1.depth_;
-
-        DeviceVector<Data64> output_memory(
-            (2 * context_->n * current_decomp_count), stream);
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
             .n_power = context_->n_power,
@@ -1784,114 +1975,74 @@ namespace heongpu
             .mod_inverse = context_->n_inverse_->data(),
             .stream = stream};
 
-        gpuntt::GPU_INTT(input1.data(), temp0_rotation,
-                         context_->intt_table_->data(),
-                         context_->modulus_->data(), cfg_intt,
-                         2 * current_decomp_count, current_decomp_count);
-
-        cipher_broadcast_switchkey_leveled_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            stream>>>(temp0_rotation, temp1_rotation, temp2_rotation,
-                      context_->modulus_->data(), context_->n_power,
-                      first_rns_mod_count, current_rns_mod_count,
-                      current_decomp_count);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
-        int location = 0;
-        for (int i = 0; i < input1.depth_; i++)
-        {
-            location += counter;
-            counter--;
-        }
         gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp2_rotation, context_->ntt_table_->data(),
-            context_->modulus_->data(), cfg_ntt,
-            current_decomp_count * current_rns_mod_count, current_rns_mod_count,
-            new_prime_locations + location);
+            key_switched.data(), context_->intt_table_->data(),
+            context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
+            current_rns_mod_count, new_prime_locations + location);
 
-        // TODO: make it efficient
-        int iteration_count_1 = current_decomp_count / 4;
-        int iteration_count_2 = current_decomp_count % 4;
-        if (switch_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp2_rotation, switch_key.data(), temp3_rotation,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, iteration_count_1,
-                          iteration_count_2, context_->n_power);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(switch_key.host_location_,
-                                              stream);
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp2_rotation, key_location.data(), temp3_rotation,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, iteration_count_1,
-                          iteration_count_2, context_->n_power);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt2 = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data() + first_decomp_count,
-            .stream = stream};
-
-        gpuntt::GPU_NTT_Poly_Ordered_Inplace(
-            temp3_rotation,
-            context_->intt_table_->data() +
-                (first_decomp_count << context_->n_power),
-            context_->modulus_->data() + first_decomp_count, cfg_intt2, 2, 1,
-            new_input_locations + (input1.depth_ * 2));
-
-        divide_round_lastq_leveled_stage_one_kernel<<<
-            dim3((context_->n >> 8), 2, 1), 256, 0, stream>>>(
-            temp3_rotation, temp2_rotation, context_->modulus_->data(),
+        // ModDown + Permute
+        divide_round_lastq_permute_ckks_kernel<<<dim3((context_->n >> 8),
+                                                      current_decomp_count, 2),
+                                                 256, 0, stream>>>(
+            key_switched.data(), decomposition.coefficients.data(),
+            output_memory.data(), context_->modulus_->data(),
             context_->half_p_->data(), context_->half_mod_->data(),
-            context_->n_power, first_decomp_count, current_decomp_count);
-
+            context_->last_q_modinv_->data(), galois_elt, context_->n_power,
+            current_rns_mod_count, current_decomp_count, first_rns_mod_count,
+            first_decomp_count, context_->P_size);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-        gpuntt::GPU_NTT_Inplace(temp2_rotation, context_->ntt_table_->data(),
+        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
+            .n_power = context_->n_power,
+            .ntt_type = gpuntt::FORWARD,
+            .ntt_layout = gpuntt::PerPolynomial,
+            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
+            .zero_padding = false,
+            .stream = stream};
+
+        gpuntt::GPU_NTT_Inplace(output_memory.data(),
+                                context_->ntt_table_->data(),
                                 context_->modulus_->data(), cfg_ntt,
                                 2 * current_decomp_count, current_decomp_count);
 
-        // TODO: Merge with previous one
-        gpuntt::GPU_NTT_Inplace(temp1_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                current_decomp_count, current_decomp_count);
-
-        divide_round_lastq_leveled_stage_two_switchkey_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            stream>>>(temp2_rotation, temp3_rotation, temp1_rotation,
-                      output_memory.data(), context_->modulus_->data(),
-                      context_->last_q_modinv_->data(), context_->n_power,
-                      current_decomp_count);
-
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        // Read before output is replaced, as output can be input1.
+        double scale = input1.scale_;
+        int depth = input1.depth_;
+        bool in_ntt_domain = input1.in_ntt_domain_;
+        encoding encoding_type = input1.encoding_;
+        bool rescale_required = input1.rescale_required_;
+        bool relinearization_required = input1.relinearization_required_;
 
         output.memory_set(std::move(output_memory));
+
+        output.scheme_ = context_->scheme_;
+        output.context_id_ = context_->context_id_;
+        output.ring_size_ = context_->n;
+        output.coeff_modulus_count_ = context_->Q_size;
+        output.cipher_size_ = 2;
+        output.depth_ = depth;
+        output.scale_ = scale;
+        output.in_ntt_domain_ = in_ntt_domain;
+        output.encoding_ = encoding_type;
+        output.rescale_required_ = rescale_required;
+        output.relinearization_required_ = relinearization_required;
+        output.ciphertext_generated_ = true;
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::switchkey_ckks_method_II(
+    __host__ void HEOperator<Scheme::CKKS>::apply_galois_ckks(
         Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Switchkey<Scheme::CKKS>& switch_key, const cudaStream_t stream)
+        const Galoiskey<Scheme::CKKS>& galois_key, int galois_elt,
+        const cudaStream_t stream)
+    {
+        GaloisDecomposition decomposition =
+            decompose_for_galois(input1, stream);
+        apply_galois_decomposed(input1, decomposition, output, galois_key,
+                                galois_elt, stream);
+    }
+
+    __host__ void HEOperator<Scheme::CKKS>::switchkey_ckks(
+        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
+        const Switchkey<Scheme::CKKS>& switch_key, const cudaStream_t stream)
     {
         int first_rns_mod_count = context_->Q_prime_size;
         int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
@@ -1937,12 +2088,10 @@ namespace heongpu
                          context_->modulus_->data(), cfg_intt,
                          2 * current_decomp_count, current_decomp_count);
 
-        cipher_broadcast_switchkey_method_II_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            stream>>>(temp0_rotation, temp1_rotation, temp2_rotation,
-                      context_->modulus_->data(), context_->n_power,
-                      current_decomp_count);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        // c0 and c1 in coefficient form.
+        temp1_rotation = temp0_rotation;
+        temp2_rotation =
+            temp0_rotation + (current_decomp_count << context_->n_power);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
             .n_power = context_->n_power,
@@ -1960,25 +2109,8 @@ namespace heongpu
             counter--;
         }
 
-        base_conversion_DtoQtilde_relin_leveled_kernel<<<
-            dim3((context_->n >> 8),
-                 context_->d_leveled->operator[](input1.depth_), 1),
-            256, 0, stream>>>(
-            temp2_rotation, temp3_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Qtilda_leveled
-                ->
-                operator[](input1.depth_)
-                .data(),
-            context_->Mi_inv_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->prod_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->I_j_leveled->operator[](input1.depth_).data(),
-            context_->I_location_leveled->operator[](input1.depth_).data(),
-            context_->n_power, context_->d_leveled->operator[](input1.depth_),
-            current_rns_mod_count, current_decomp_count, input1.depth_,
-            context_->prime_location_leveled->data() + location);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        decompose_to_Qtilde(temp2_rotation, temp3_rotation, input1.depth_,
+                            stream);
 
         gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
             temp3_rotation, context_->ntt_table_->data(),
@@ -1992,9 +2124,9 @@ namespace heongpu
             context_->d_leveled->operator[](input1.depth_) / 4;
         int iteration_count_2 =
             context_->d_leveled->operator[](input1.depth_) % 4;
-        if (switch_key.storage_type_ == storage_type::DEVICE)
+        if (switch_key.storage_type_ == storage_type::device)
         {
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
                 stream>>>(temp3_rotation, switch_key.data(), temp4_rotation,
                           context_->modulus_->data(), first_rns_mod_count,
@@ -2007,7 +2139,7 @@ namespace heongpu
         {
             DeviceVector<Data64> key_location(switch_key.host_location_,
                                               stream);
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
                 stream>>>(temp3_rotation, key_location.data(), temp4_rotation,
                           context_->modulus_->data(), first_rns_mod_count,
@@ -2017,171 +2149,94 @@ namespace heongpu
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
 
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp4_rotation, context_->intt_table_->data(),
-            context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
-            current_rns_mod_count, new_prime_locations + location);
-
-        divide_round_lastq_extended_leveled_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            stream>>>(
-            temp4_rotation, temp3_rotation, context_->modulus_->data(),
-            context_->half_p_->data(), context_->half_mod_->data(),
-            context_->last_q_modinv_->data(), context_->n_power,
-            current_rns_mod_count, current_decomp_count, first_rns_mod_count,
-            first_decomp_count, context_->P_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(temp3_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * current_decomp_count, current_decomp_count);
-
-        // TODO: Fused the redundant kernels
-        // TODO: Merge with previous one
-        gpuntt::GPU_NTT_Inplace(temp1_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                current_decomp_count, current_decomp_count);
-
-        addition_switchkey<<<dim3((context_->n >> 8), current_decomp_count, 2),
-                             256, 0, stream>>>(
-            temp3_rotation, temp1_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        output.memory_set(std::move(output_memory));
-    }
-
-    __host__ void HEOperator<Scheme::CKKS>::conjugate_ckks_method_I(
-        Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Galoiskey<Scheme::CKKS>& conjugate_key, const cudaStream_t stream)
-    {
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
-
-        int first_decomp_count = context_->Q_size;
-        int current_decomp_count = context_->Q_size - input1.depth_;
-
-        DeviceVector<Data64> output_memory(
-            (2 * context_->n * current_decomp_count), stream);
-
-        int galois_elt = conjugate_key.galois_elt_zero;
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT(input1.data(), temp0_rotation,
-                         context_->intt_table_->data(),
-                         context_->modulus_->data(), cfg_intt,
-                         2 * current_decomp_count, current_decomp_count);
-
-        // TODO: make it efficient
-        ckks_duplicate_kernel<<<dim3((context_->n >> 8), current_decomp_count,
-                                     1),
-                                256, 0, stream>>>(
-            temp0_rotation, temp2_rotation, context_->modulus_->data(),
-            context_->n_power, first_rns_mod_count, current_rns_mod_count,
-            current_decomp_count);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
-        int location = 0;
-        for (int i = 0; i < input1.depth_; i++)
+        if (context_->P_size == 1)
         {
-            location += counter;
-            counter--;
-        }
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp2_rotation, context_->ntt_table_->data(),
-            context_->modulus_->data(), cfg_ntt,
-            current_decomp_count * current_rns_mod_count, current_rns_mod_count,
-            new_prime_locations + location);
+            // ModDown in the NTT domain: only the P part is transformed back.
+            gpuntt::ntt_rns_configuration<Data64> cfg_intt_p = {
+                .n_power = context_->n_power,
+                .ntt_type = gpuntt::INVERSE,
+                .ntt_layout = gpuntt::PerPolynomial,
+                .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
+                .zero_padding = false,
+                .mod_inverse =
+                    context_->n_inverse_->data() + first_decomp_count,
+                .stream = stream};
 
-        // MultSum
-        // TODO: make it efficient
-        int iteration_count_1 = current_decomp_count / 4;
-        int iteration_count_2 = current_decomp_count % 4;
-        if (conjugate_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp2_rotation, conjugate_key.c_data(),
-                          temp3_rotation, context_->modulus_->data(),
-                          first_rns_mod_count, current_decomp_count,
-                          iteration_count_1, iteration_count_2,
-                          context_->n_power);
+            gpuntt::GPU_NTT_Poly_Ordered_Inplace(
+                temp4_rotation,
+                context_->intt_table_->data() +
+                    (first_decomp_count << context_->n_power),
+                context_->modulus_->data() + first_decomp_count, cfg_intt_p, 2,
+                1, new_input_locations + (input1.depth_ * 2));
+
+            divide_round_lastq_leveled_stage_one_kernel<<<
+                dim3((context_->n >> 8), 2, 1), 256, 0, stream>>>(
+                temp4_rotation, temp3_rotation, context_->modulus_->data(),
+                context_->half_p_->data(), context_->half_mod_->data(),
+                context_->n_power, first_decomp_count, current_decomp_count);
+            HEONGPU_CUDA_CHECK(cudaGetLastError());
+
+            gpuntt::GPU_NTT_Inplace(
+                temp3_rotation, context_->ntt_table_->data(),
+                context_->modulus_->data(), cfg_ntt, 2 * current_decomp_count,
+                current_decomp_count);
+
+            gpuntt::GPU_NTT_Inplace(temp1_rotation,
+                                    context_->ntt_table_->data(),
+                                    context_->modulus_->data(), cfg_ntt,
+                                    current_decomp_count, current_decomp_count);
+
+            divide_round_lastq_leveled_stage_two_switchkey_kernel<<<
+                dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
+                stream>>>(temp3_rotation, temp4_rotation, temp1_rotation,
+                          output_memory.data(), context_->modulus_->data(),
+                          context_->last_q_modinv_->data(), context_->n_power,
+                          current_decomp_count);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
         else
         {
-            DeviceVector<Data64> key_location(conjugate_key.zero_host_location_,
-                                              stream);
-            keyswitch_multiply_accumulate_leveled_kernel<<<
-                dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-                stream>>>(temp2_rotation, key_location.data(), temp3_rotation,
-                          context_->modulus_->data(), first_rns_mod_count,
-                          current_decomp_count, iteration_count_1,
-                          iteration_count_2, context_->n_power);
+            gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
+                temp4_rotation, context_->intt_table_->data(),
+                context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
+                current_rns_mod_count, new_prime_locations + location);
+
+            divide_round_lastq_extended_leveled_kernel<<<
+                dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
+                stream>>>(
+                temp4_rotation, temp3_rotation, context_->modulus_->data(),
+                context_->half_p_->data(), context_->half_mod_->data(),
+                context_->last_q_modinv_->data(), context_->n_power,
+                current_rns_mod_count, current_decomp_count,
+                first_rns_mod_count, first_decomp_count, context_->P_size);
+            HEONGPU_CUDA_CHECK(cudaGetLastError());
+
+            gpuntt::GPU_NTT_Inplace(
+                temp3_rotation, context_->ntt_table_->data(),
+                context_->modulus_->data(), cfg_ntt, 2 * current_decomp_count,
+                current_decomp_count);
+
+            // TODO: Fused the redundant kernels
+            // TODO: Merge with previous one
+            gpuntt::GPU_NTT_Inplace(temp1_rotation,
+                                    context_->ntt_table_->data(),
+                                    context_->modulus_->data(), cfg_ntt,
+                                    current_decomp_count, current_decomp_count);
+
+            addition_switchkey<<<dim3((context_->n >> 8), current_decomp_count,
+                                      2),
+                                 256, 0, stream>>>(
+                temp3_rotation, temp1_rotation, output_memory.data(),
+                context_->modulus_->data(), context_->n_power);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
-
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp3_rotation, context_->intt_table_->data(),
-            context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
-            current_rns_mod_count, new_prime_locations + location);
-
-        // ModDown + Permute
-        divide_round_lastq_permute_ckks_kernel<<<dim3((context_->n >> 8),
-                                                      current_decomp_count, 2),
-                                                 256, 0, stream>>>(
-            temp3_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            galois_elt, context_->n_power, current_rns_mod_count,
-            current_decomp_count, first_rns_mod_count, first_decomp_count,
-            context_->P_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(output_memory.data(),
-                                context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * current_decomp_count, current_decomp_count);
 
         output.memory_set(std::move(output_memory));
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::conjugate_ckks_method_II(
+    __host__ void HEOperator<Scheme::CKKS>::conjugate_ckks(
         Ciphertext<Scheme::CKKS>& input1, Ciphertext<Scheme::CKKS>& output,
-        Galoiskey<Scheme::CKKS>& conjugate_key, const cudaStream_t stream)
+        const Galoiskey<Scheme::CKKS>& conjugate_key, const cudaStream_t stream)
     {
         int first_rns_mod_count = context_->Q_prime_size;
         int current_rns_mod_count = context_->Q_prime_size - input1.depth_;
@@ -2245,26 +2300,9 @@ namespace heongpu
             counter--;
         }
 
-        base_conversion_DtoQtilde_relin_leveled_kernel<<<
-            dim3((context_->n >> 8),
-                 context_->d_leveled->operator[](input1.depth_), 1),
-            256, 0, stream>>>(
-            temp0_rotation + (current_decomp_count << context_->n_power),
-            temp3_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Qtilda_leveled
-                ->
-                operator[](input1.depth_)
-                .data(),
-            context_->Mi_inv_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->prod_D_to_Qtilda_leveled->operator[](input1.depth_)
-                .data(),
-            context_->I_j_leveled->operator[](input1.depth_).data(),
-            context_->I_location_leveled->operator[](input1.depth_).data(),
-            context_->n_power, context_->d_leveled->operator[](input1.depth_),
-            current_rns_mod_count, current_decomp_count, input1.depth_,
-            context_->prime_location_leveled->data() + location);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        decompose_to_Qtilde(temp0_rotation +
+                                (current_decomp_count << context_->n_power),
+                            temp3_rotation, input1.depth_, stream);
 
         gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
             temp3_rotation, context_->ntt_table_->data(),
@@ -2279,9 +2317,9 @@ namespace heongpu
             context_->d_leveled->operator[](input1.depth_) / 4;
         int iteration_count_2 =
             context_->d_leveled->operator[](input1.depth_) % 4;
-        if (conjugate_key.storage_type_ == storage_type::DEVICE)
+        if (conjugate_key.storage_type_ == storage_type::device)
         {
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
                 stream>>>(temp3_rotation, conjugate_key.c_data(),
                           temp4_rotation, context_->modulus_->data(),
@@ -2294,7 +2332,7 @@ namespace heongpu
         {
             DeviceVector<Data64> key_location(conjugate_key.zero_host_location_,
                                               stream);
-            keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+            keyswitch_multiply_accumulate_leveled_kernel<<<
                 dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
                 stream>>>(temp3_rotation, key_location.data(), temp4_rotation,
                           context_->modulus_->data(), first_rns_mod_count,
@@ -2341,11 +2379,12 @@ namespace heongpu
         Plaintext<Scheme::CKKS> plain;
 
         plain.scheme_ = context_->scheme_;
+        plain.context_id_ = context_->context_id_;
         plain.plain_size_ = context_->n * context_->Q_size; // context_->n
         plain.depth_ = 0;
         plain.scale_ = 0;
         plain.in_ntt_domain_ = true;
-        plain.encoding_ = encoding::SLOT;
+        plain.encoding_ = encoding::slot;
 
         plain.device_locations_ =
             DeviceVector<Data64>(plain.plain_size_, stream);
@@ -2360,13 +2399,14 @@ namespace heongpu
         Plaintext<Scheme::CKKS> plain;
 
         plain.scheme_ = input.scheme_;
+        plain.context_id_ = input.context_id_;
         plain.plain_size_ = input.plain_size_;
         plain.depth_ = input.depth_;
         plain.scale_ = input.scale_;
         plain.in_ntt_domain_ = input.in_ntt_domain_;
         plain.encoding_ = input.encoding_;
 
-        plain.storage_type_ = storage_type::DEVICE;
+        plain.storage_type_ = storage_type::device;
         plain.device_locations_ =
             DeviceVector<Data64>(plain.plain_size_, stream);
 
@@ -2385,9 +2425,10 @@ namespace heongpu
         cipher.depth_ = 0;
 
         cipher.scheme_ = context_->scheme_;
+        cipher.context_id_ = context_->context_id_;
         cipher.in_ntt_domain_ = true;
-        cipher.encoding_ = encoding::SLOT;
-        cipher.storage_type_ = storage_type::DEVICE;
+        cipher.encoding_ = encoding::slot;
+        cipher.storage_type_ = storage_type::device;
 
         cipher.rescale_required_ = false;
         cipher.relinearization_required_ = false;
@@ -2405,7 +2446,7 @@ namespace heongpu
 
     __host__ Ciphertext<Scheme::CKKS>
     HEOperator<Scheme::CKKS>::operator_from_ciphertext(
-        Ciphertext<Scheme::CKKS>& input, cudaStream_t stream)
+        const Ciphertext<Scheme::CKKS>& input, cudaStream_t stream)
     {
         Ciphertext<Scheme::CKKS> cipher;
 
@@ -2415,10 +2456,11 @@ namespace heongpu
         cipher.depth_ = input.depth_;
 
         cipher.scheme_ = input.scheme_;
+        cipher.context_id_ = input.context_id_;
         cipher.in_ntt_domain_ = input.in_ntt_domain_;
         cipher.encoding_ = input.encoding_;
 
-        cipher.storage_type_ = storage_type::DEVICE;
+        cipher.storage_type_ = storage_type::device;
 
         cipher.rescale_required_ = input.rescale_required_;
         cipher.relinearization_required_ = input.relinearization_required_;
@@ -2568,7 +2610,8 @@ namespace heongpu
     }
 
     __host__ void HEOperator<Scheme::CKKS>::quick_ckks_encoder_constant_complex(
-        Complex64 input, Data64* output, const double scale)
+        Complex64 input, Data64* output, const double scale,
+        cudaStream_t stream)
     {
         // std::vector<Complex64> in = {input};
         std::vector<Complex64> in;
@@ -2576,10 +2619,10 @@ namespace heongpu
         {
             in.push_back(input);
         }
-        DeviceVector<Complex64> message_gpu(slot_count_);
-        cudaMemcpy(message_gpu.data(), in.data(), in.size() * sizeof(Complex64),
-                   cudaMemcpyHostToDevice);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        DeviceVector<Complex64> message_gpu(slot_count_, stream);
+        HEONGPU_CUDA_CHECK(cudaMemcpyAsync(message_gpu.data(), in.data(),
+                                           in.size() * sizeof(Complex64),
+                                           cudaMemcpyHostToDevice, stream));
 
         double fix = scale / static_cast<double>(slot_count_);
 
@@ -2587,13 +2630,13 @@ namespace heongpu
         cfg_ifft.n_power = log_slot_count_;
         cfg_ifft.fft_type = gpufft::type::INVERSE;
         cfg_ifft.mod_inverse = Complex64(fix, 0.0);
-        cfg_ifft.stream = 0;
+        cfg_ifft.stream = stream;
 
         gpufft::GPU_Special_FFT(message_gpu.data(),
                                 special_ifft_roots_table_->data(), cfg_ifft, 1);
 
-        encode_kernel_ckks_conversion<<<dim3(((slot_count_) >> 8), 1, 1),
-                                        256>>>(
+        encode_kernel_ckks_conversion<<<dim3(((slot_count_) >> 8), 1, 1), 256,
+                                        0, stream>>>(
             output, message_gpu.data(), context_->modulus_->data(),
             context_->Q_size, two_pow_64_, reverse_order_->data(),
             context_->n_power);
@@ -2605,7 +2648,7 @@ namespace heongpu
             .ntt_layout = gpuntt::PerPolynomial,
             .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
             .zero_padding = false,
-            .stream = 0};
+            .stream = stream};
 
         gpuntt::GPU_NTT_Inplace(output, context_->ntt_table_->data(),
                                 context_->modulus_->data(), cfg_ntt,
@@ -2613,24 +2656,25 @@ namespace heongpu
     }
 
     __host__ void HEOperator<Scheme::CKKS>::quick_ckks_encoder_constant_double(
-        double input, Data64* output, const double scale)
+        double input, Data64* output, const double scale, cudaStream_t stream)
     {
         double value = input * scale;
 
         encode_kernel_double_ckks_conversion<<<dim3((context_->n >> 8), 1, 1),
-                                               256>>>(
+                                               256, 0, stream>>>(
             output, value, context_->modulus_->data(), context_->Q_size,
             two_pow_64_, context_->n_power);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
     }
 
     __host__ void HEOperator<Scheme::CKKS>::quick_ckks_encoder_constant_integer(
-        std::int64_t input, Data64* output, const double scale)
+        std::int64_t input, Data64* output, const double scale,
+        cudaStream_t stream)
     {
         double value = static_cast<double>(input) * scale;
 
         encode_kernel_double_ckks_conversion<<<dim3((context_->n >> 8), 1, 1),
-                                               256>>>(
+                                               256, 0, stream>>>(
             output, value, context_->modulus_->data(), context_->Q_size,
             two_pow_64_, context_->n_power);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
@@ -2638,75 +2682,7 @@ namespace heongpu
 
     __host__ std::vector<heongpu::DeviceVector<Data64>>
     HEOperator<Scheme::CKKS>::encode_V_matrixs(Vandermonde& vandermonde,
-                                               const double scale,
-                                               int rns_count)
-    {
-        std::vector<heongpu::DeviceVector<Data64>> result;
-
-        int rns_count_in = rns_count - vandermonde.StoC_piece_ + 1;
-
-        for (int m = 0; m < vandermonde.StoC_piece_; m++)
-        {
-            heongpu::DeviceVector<Data64> temp_encoded(
-                (vandermonde.V_matrixs_index_[m].size() * (rns_count_in + m))
-                << (vandermonde.log_num_slots_ + 1));
-
-            for (int i = 0; i < vandermonde.V_matrixs_index_[m].size(); i++)
-            {
-                int matrix_location = (i << vandermonde.log_num_slots_);
-                int plaintext_location = ((i * (rns_count_in + m))
-                                          << (vandermonde.log_num_slots_ + 1));
-
-                quick_ckks_encoder_vec_complex(
-                    vandermonde.V_matrixs_rotated_[m].data() + matrix_location,
-                    temp_encoded.data() + plaintext_location, scale,
-                    (rns_count_in + m));
-            }
-
-            result.push_back(std::move(temp_encoded));
-        }
-
-        return result;
-    }
-
-    __host__ std::vector<heongpu::DeviceVector<Data64>>
-    HEOperator<Scheme::CKKS>::encode_V_inv_matrixs(Vandermonde& vandermonde,
-                                                   const double scale,
-                                                   int rns_count)
-    {
-        std::vector<heongpu::DeviceVector<Data64>> result;
-
-        int rns_count_in = rns_count - vandermonde.CtoS_piece_ + 1;
-
-        for (int m = 0; m < vandermonde.CtoS_piece_; m++)
-        {
-            heongpu::DeviceVector<Data64> temp_encoded(
-                (vandermonde.V_inv_matrixs_index_[m].size() *
-                 (rns_count_in + m))
-                << (vandermonde.log_num_slots_ + 1));
-
-            for (int i = 0; i < vandermonde.V_inv_matrixs_index_[m].size(); i++)
-            {
-                int matrix_location = (i << vandermonde.log_num_slots_);
-                int plaintext_location = ((i * (rns_count_in + m))
-                                          << (vandermonde.log_num_slots_ + 1));
-
-                quick_ckks_encoder_vec_complex(
-                    vandermonde.V_inv_matrixs_rotated_[m].data() +
-                        matrix_location,
-                    temp_encoded.data() + plaintext_location, scale,
-                    (rns_count_in + m));
-            }
-
-            result.push_back(std::move(temp_encoded));
-        }
-
-        return result;
-    }
-
-    __host__ std::vector<heongpu::DeviceVector<Data64>>
-    HEOperator<Scheme::CKKS>::encode_V_matrixs_v2(Vandermonde& vandermonde,
-                                                  int start_level)
+                                               int start_level)
     {
         std::vector<heongpu::DeviceVector<Data64>> result;
 
@@ -2766,8 +2742,8 @@ namespace heongpu
     }
 
     __host__ std::vector<heongpu::DeviceVector<Data64>>
-    HEOperator<Scheme::CKKS>::encode_V_inv_matrixs_v2(Vandermonde& vandermonde,
-                                                      int start_level)
+    HEOperator<Scheme::CKKS>::encode_V_inv_matrixs(Vandermonde& vandermonde,
+                                                   int start_level)
     {
         std::vector<heongpu::DeviceVector<Data64>> result;
 
@@ -2828,113 +2804,16 @@ namespace heongpu
     }
 
     __host__ Ciphertext<Scheme::CKKS> HEOperator<Scheme::CKKS>::multiply_matrix(
-        Ciphertext<Scheme::CKKS>& cipher,
-        std::vector<heongpu::DeviceVector<Data64>>& matrix,
-        std::vector<std::vector<std::vector<int>>>& diags_matrices_bsgs_,
-        Galoiskey<Scheme::CKKS>& galois_key, const ExecutionOptions& options)
-    {
-        cudaStream_t old_stream = cipher.stream();
-        cipher.switch_stream(
-            options.stream_); // TODO: Change copy and assign structure!
-        Ciphertext<Scheme::CKKS> result;
-        result = cipher;
-        cipher.switch_stream(
-            old_stream); // TODO: Change copy and assign structure!
-
-        int matrix_count = diags_matrices_bsgs_.size();
-        for (int m = (matrix_count - 1); - 1 < m; m--)
-        {
-            int n1 = diags_matrices_bsgs_[m][0].size();
-            int current_level = result.depth_;
-            int current_decomp_count = (context_->Q_size - current_level);
-
-            DeviceVector<Data64> rotated_result =
-                fast_single_hoisting_rotation_ckks(
-                    result, diags_matrices_bsgs_[m][0], n1, galois_key,
-                    options.stream_);
-
-            int counter = 0;
-            for (int j = 0; j < diags_matrices_bsgs_[m].size(); j++)
-            {
-                int real_shift = diags_matrices_bsgs_[m][j][0];
-
-                Ciphertext<Scheme::CKKS> inner_sum =
-                    operator_ciphertext(0, options.stream_);
-
-                // int matrix_plaintext_location = (counter * context_->Q_size)
-                // << context_->n_power;
-                int matrix_plaintext_location = (counter * current_decomp_count)
-                                                << context_->n_power;
-                int inner_n1 = diags_matrices_bsgs_[m][j].size();
-
-                cipherplain_multiply_accumulate_kernel<<<
-                    dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-                    options.stream_>>>(
-                    rotated_result.data(),
-                    matrix[m].data() + matrix_plaintext_location,
-                    inner_sum.data(), context_->modulus_->data(), inner_n1,
-                    // current_decomp_count, context_->Q_size,
-                    // context_->n_power);
-                    current_decomp_count, current_decomp_count,
-                    context_->n_power);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                counter = counter + inner_n1;
-
-                inner_sum.scheme_ = context_->scheme_;
-                inner_sum.ring_size_ = context_->n;
-                inner_sum.coeff_modulus_count_ =
-                    current_decomp_count; // context_->Q_size;
-                inner_sum.cipher_size_ = 2;
-                inner_sum.depth_ = result.depth_;
-                inner_sum.scale_ = result.scale_;
-                inner_sum.in_ntt_domain_ = result.in_ntt_domain_;
-                inner_sum.encoding_ = result.encoding_;
-                inner_sum.rescale_required_ = result.rescale_required_;
-                inner_sum.relinearization_required_ =
-                    result.relinearization_required_;
-                inner_sum.ciphertext_generated_ = true;
-
-                rotate_rows_inplace(inner_sum, galois_key, real_shift, options);
-
-                if (j == 0)
-                {
-                    cudaStream_t old_stream2 = inner_sum.stream();
-                    inner_sum.switch_stream(
-                        options.stream_); // TODO: Change copy and assign
-                                          // structure!
-                    result = inner_sum;
-                    inner_sum.switch_stream(
-                        old_stream2); // TODO: Change copy and assign structure!
-                }
-                else
-                {
-                    add(result, inner_sum, result, options);
-                }
-            }
-
-            result.scale_ = result.scale_ * scale_boot_;
-            result.rescale_required_ = true;
-            rescale_inplace(result, options);
-        }
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HEOperator<Scheme::CKKS>::multiply_matrix_v2(
-        Ciphertext<Scheme::CKKS>& cipher,
+        const Ciphertext<Scheme::CKKS>& cipher,
         std::vector<heongpu::DeviceVector<Data64>>& matrix,
         std::vector<std::vector<std::vector<int>>>& diags_matrices_bsgs_,
         std::vector<std::vector<int>>& diags_matrices_bsgs_rot_n1_,
         std::vector<std::vector<int>>& diags_matrices_bsgs_rot_n2_,
-        Galoiskey<Scheme::CKKS>& galois_key, const ExecutionOptions& options)
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const ExecutionOptions& options)
     {
-        cudaStream_t old_stream = cipher.stream();
-        cipher.switch_stream(options.stream_);
         Ciphertext<Scheme::CKKS> result;
-        result = cipher;
-        cipher.switch_stream(old_stream);
+        copy_to_stream(cipher, result, options.stream_);
 
         int matrix_count = diags_matrices_bsgs_.size();
         int n = context_->n;
@@ -2944,7 +2823,7 @@ namespace heongpu
         int first_rns_mod_count = Q_prime_size;
         cudaStream_t stream = options.stream_;
 
-        for (int m = (matrix_count - 1); -1 < m; m--)
+        for (int m = (matrix_count - 1); - 1 < m; m--)
         {
             int current_level = result.depth_;
             int current_decomp_count = Q_size - current_level;
@@ -3037,26 +2916,9 @@ namespace heongpu
                                        stream);
 
             {
-                base_conversion_DtoQtilde_relin_leveled_kernel<<<
-                    dim3((n >> 8), d_level, 1), 256, 0, stream>>>(
+                decompose_to_Qtilde(
                     temp0.data() + (current_decomp_count << context_->n_power),
-                    temp3.data(), context_->modulus_->data(),
-                    context_->base_change_matrix_D_to_Qtilda_leveled
-                        ->operator[](current_level)
-                        .data(),
-                    context_->Mi_inv_D_to_Qtilda_leveled
-                        ->operator[](current_level)
-                        .data(),
-                    context_->prod_D_to_Qtilda_leveled
-                        ->operator[](current_level)
-                        .data(),
-                    context_->I_j_leveled->operator[](current_level).data(),
-                    context_->I_location_leveled->operator[](current_level)
-                        .data(),
-                    context_->n_power, d_level, current_rns_mod_count,
-                    current_decomp_count, current_level,
-                    context_->prime_location_leveled->data() + location);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
+                    temp3.data(), current_level, stream);
             }
 
             {
@@ -3127,13 +2989,13 @@ namespace heongpu
                 // MultSum: decomposed c1 × rotation key -> (ks0, ks1) in PQ_l
                 // NTT
                 {
-                    if (galois_key.storage_type_ == storage_type::DEVICE)
+                    if (galois_key.storage_type_ == storage_type::device)
                     {
-                        keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+                        keyswitch_multiply_accumulate_leveled_kernel<<<
                             dim3((n >> 8), current_rns_mod_count, 1), 256, 0,
                             stream>>>(
                             temp3.data(),
-                            galois_key.device_location_[galois_elt].data(),
+                            galois_key.device_location_.at(galois_elt).data(),
                             temp4.data(), context_->modulus_->data(),
                             first_rns_mod_count, current_decomp_count,
                             current_rns_mod_count, iteration_count_1,
@@ -3144,8 +3006,8 @@ namespace heongpu
                     else
                     {
                         DeviceVector<Data64> key_location(
-                            galois_key.host_location_[galois_elt], stream);
-                        keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+                            galois_key.host_location_.at(galois_elt), stream);
+                        keyswitch_multiply_accumulate_leveled_kernel<<<
                             dim3((n >> 8), current_rns_mod_count, 1), 256, 0,
                             stream>>>(temp3.data(), key_location.data(),
                                       temp4.data(), context_->modulus_->data(),
@@ -3274,26 +3136,8 @@ namespace heongpu
 
                 // Decompose u1_Q -> PQ_l coeff, then NTT
                 {
-                    base_conversion_DtoQtilde_relin_leveled_kernel<<<
-                        dim3((n >> 8), d_level, 1), 256, 0, stream>>>(
-                        u1_Q.data(), temp3_gs.data(),
-                        context_->modulus_->data(),
-                        context_->base_change_matrix_D_to_Qtilda_leveled
-                            ->operator[](current_level)
-                            .data(),
-                        context_->Mi_inv_D_to_Qtilda_leveled
-                            ->operator[](current_level)
-                            .data(),
-                        context_->prod_D_to_Qtilda_leveled
-                            ->operator[](current_level)
-                            .data(),
-                        context_->I_j_leveled->operator[](current_level).data(),
-                        context_->I_location_leveled->operator[](current_level)
-                            .data(),
-                        context_->n_power, d_level, current_rns_mod_count,
-                        current_decomp_count, current_level,
-                        context_->prime_location_leveled->data() + location);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
+                    decompose_to_Qtilde(u1_Q.data(), temp3_gs.data(),
+                                        current_level, stream);
                 }
 
                 {
@@ -3307,13 +3151,14 @@ namespace heongpu
                 // MultSum: decomposed u1 × giant-step key -> (gs0, gs1) in PQ_l
                 // NTT
                 {
-                    if (galois_key.storage_type_ == storage_type::DEVICE)
+                    if (galois_key.storage_type_ == storage_type::device)
                     {
-                        keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+                        keyswitch_multiply_accumulate_leveled_kernel<<<
                             dim3((n >> 8), current_rns_mod_count, 1), 256, 0,
                             stream>>>(
                             temp3_gs.data(),
-                            galois_key.device_location_[galois_elt_gs].data(),
+                            galois_key.device_location_.at(galois_elt_gs)
+                                .data(),
                             temp4_gs.data(), context_->modulus_->data(),
                             first_rns_mod_count, current_decomp_count,
                             current_rns_mod_count, iteration_count_1,
@@ -3324,8 +3169,9 @@ namespace heongpu
                     else
                     {
                         DeviceVector<Data64> key_location(
-                            galois_key.host_location_[galois_elt_gs], stream);
-                        keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
+                            galois_key.host_location_.at(galois_elt_gs),
+                            stream);
+                        keyswitch_multiply_accumulate_leveled_kernel<<<
                             dim3((n >> 8), current_rns_mod_count, 1), 256, 0,
                             stream>>>(temp3_gs.data(), key_location.data(),
                                       temp4_gs.data(),
@@ -3402,6 +3248,7 @@ namespace heongpu
             // Copy into result ciphertext
             result.device_locations_ = std::move(final_ct);
             result.scheme_ = context_->scheme_;
+            result.context_id_ = context_->context_id_;
             result.ring_size_ = n;
             result.coeff_modulus_count_ = Q_size;
             result.cipher_size_ = 2;
@@ -3413,7 +3260,7 @@ namespace heongpu
 
             // Rescale
             double scale = static_cast<double>(
-                context_->prime_vector_[current_decomp_count-1].value);
+                context_->prime_vector_[current_decomp_count - 1].value);
             result.scale_ = result.scale_ * scale;
             result.rescale_required_ = true;
             rescale_inplace(result, options);
@@ -3422,166 +3269,62 @@ namespace heongpu
         return result;
     }
 
-    __host__ Ciphertext<Scheme::CKKS>
-    HEOperator<Scheme::CKKS>::multiply_matrix_less_memory(
+    __host__ std::vector<Ciphertext<Scheme::CKKS>>
+    HEOperator<Scheme::CKKS>::coeff_to_slot(
         Ciphertext<Scheme::CKKS>& cipher,
-        std::vector<heongpu::DeviceVector<Data64>>& matrix,
-        std::vector<std::vector<std::vector<int>>>& diags_matrices_bsgs_,
-        std::vector<std::vector<std::vector<int>>>& real_shift,
-        Galoiskey<Scheme::CKKS>& galois_key, const ExecutionOptions& options)
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        CKKSEncodingTransformContext& transform_context,
+        const ExecutionOptions& options)
     {
-        cudaStream_t old_stream = cipher.stream();
-        cipher.switch_stream(
-            options.stream_); // TODO: Change copy and assign structure!
-        Ciphertext<Scheme::CKKS> result;
-        result = cipher;
-        cipher.switch_stream(
-            old_stream); // TODO: Change copy and assign structure!
+        require_manual("coeff_to_slot");
 
-        int matrix_count = diags_matrices_bsgs_.size();
-        for (int m = (matrix_count - 1); - 1 < m; m--)
+        cipher.validate_context(context_);
+
+        if (!transform_context.generated_)
         {
-            int n1 = diags_matrices_bsgs_[m][0].size();
-            int current_level = result.depth_;
-            int current_decomp_count = (context_->Q_size - current_level);
-
-            DeviceVector<Data64> rotated_result =
-                fast_single_hoisting_rotation_ckks(
-                    result, diags_matrices_bsgs_[m][0], n1, galois_key,
-                    options.stream_);
-
-            int counter = 0;
-            for (int j = 0; j < diags_matrices_bsgs_[m].size(); j++)
-            {
-                Ciphertext<Scheme::CKKS> inner_sum =
-                    operator_ciphertext(0, options.stream_);
-
-                // int matrix_plaintext_location = (counter * context_->Q_size)
-                // << context_->n_power;
-                int matrix_plaintext_location = (counter * current_decomp_count)
-                                                << context_->n_power;
-                int inner_n1 = diags_matrices_bsgs_[m][j].size();
-
-                cipherplain_multiply_accumulate_kernel<<<
-                    dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-                    options.stream_>>>(
-                    rotated_result.data(),
-                    matrix[m].data() + matrix_plaintext_location,
-                    inner_sum.data(), context_->modulus_->data(), inner_n1,
-                    // current_decomp_count, context_->Q_size,
-                    // context_->n_power);
-                    current_decomp_count, current_decomp_count,
-                    context_->n_power);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                counter = counter + inner_n1;
-
-                inner_sum.scheme_ = context_->scheme_;
-                inner_sum.ring_size_ = context_->n;
-                inner_sum.coeff_modulus_count_ =
-                    current_decomp_count; // context_->Q_size;
-                inner_sum.cipher_size_ = 2;
-                inner_sum.depth_ = result.depth_;
-                inner_sum.scale_ = result.scale_;
-                inner_sum.in_ntt_domain_ = result.in_ntt_domain_;
-                inner_sum.encoding_ = result.encoding_;
-                inner_sum.storage_type_ = result.storage_type_;
-                inner_sum.rescale_required_ = result.rescale_required_;
-                inner_sum.relinearization_required_ =
-                    result.relinearization_required_;
-                inner_sum.ciphertext_generated_ = true;
-
-                int real_shift_size = real_shift[m][j].size();
-                for (int ss = 0; ss < real_shift_size; ss++)
-                {
-                    int shift_amount = real_shift[m][j][ss];
-                    rotate_rows_inplace(inner_sum, galois_key, shift_amount,
-                                        options);
-                }
-
-                if (j == 0)
-                {
-                    cudaStream_t old_stream2 = inner_sum.stream();
-                    inner_sum.switch_stream(
-                        options.stream_); // TODO: Change copy and assign
-                                          // structure!
-                    result = inner_sum;
-                    inner_sum.switch_stream(
-                        old_stream2); // TODO: Change copy and assign structure!
-                }
-                else
-                {
-                    add(result, inner_sum, result, options);
-                }
-            }
-            result.scale_ = result.scale_ * scale_boot_;
-            result.rescale_required_ = true;
-            rescale_inplace(result, options);
+            throw std::invalid_argument(
+                "Encoding transform context is not generated!");
         }
 
-        return result;
-    }
-
-    __host__ std::vector<Ciphertext<Scheme::CKKS>>
-    HEOperator<Scheme::CKKS>::coeff_to_slot(Ciphertext<Scheme::CKKS>& cipher,
-                                            Galoiskey<Scheme::CKKS>& galois_key,
-                                            const ExecutionOptions& options)
-    {
-        if (cipher.encoding_ != encoding::COEFFICIENT)
+        if (cipher.encoding_ != encoding::coefficient)
         {
             throw std::invalid_argument(
                 "coeff_to_slot expects coefficient-encoded ciphertext.");
         }
 
-        Ciphertext<Scheme::CKKS> c1;
-        if (less_key_mode_)
+        if (cipher.depth_ != transform_context.CtoS_level_)
         {
-            c1 = multiply_matrix_less_memory(
-                cipher, V_inv_matrixs_rotated_encoded_,
-                diags_matrices_inv_bsgs_, real_shift_n2_inv_bsgs_, galois_key,
-                options);
-        }
-        else
-        {
-            c1 = multiply_matrix(cipher, V_inv_matrixs_rotated_encoded_,
-                                 diags_matrices_inv_bsgs_, galois_key, options);
+            throw std::logic_error("coeff_to_slot input level does not match "
+                                   "transform_context.CtoS_start_level");
         }
 
+        Ciphertext<Scheme::CKKS> c1 = multiply_matrix(
+            cipher, transform_context.V_inv_matrixs_rotated_encoded_,
+            transform_context.diags_matrices_inv_bsgs_,
+            transform_context.diags_matrices_inv_bsgs_rot_n1_,
+            transform_context.diags_matrices_inv_bsgs_rot_n2_, galois_key,
+            options);
+
         Ciphertext<Scheme::CKKS> c2 = operator_ciphertext(0, options.stream_);
-        conjugate(c1, c2, galois_key, options); // conjugate
+        conjugate(c1, c2, galois_key, options);
 
         Ciphertext<Scheme::CKKS> result0 =
             operator_ciphertext(0, options.stream_);
         add(c1, c2, result0, options);
 
-        double constant_1over2 = 0.5 * scale_boot_;
-        int current_decomp_count = context_->Q_size - result0.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(result0.data(), constant_1over2, result0.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        result0.scale_ = result0.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        result0.rescale_required_ = true;
-        rescale_inplace(result0, options);
-
         Ciphertext<Scheme::CKKS> result1 =
             operator_ciphertext(0, options.stream_);
         sub(c1, c2, result1, options);
 
-        current_decomp_count = context_->Q_size - result1.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            result1.data(), encoded_complex_minus_iover2_.data(),
-            result1.data(), context_->modulus_->data(), context_->n_power);
-        result1.scale_ = result1.scale_ * scale_boot_;
+        int current_decomp_count = context_->Q_size - result1.depth_;
+        cipher_div_by_i_kernel<<<dim3((context_->n >> 8), current_decomp_count,
+                                      2),
+                                 256, 0, options.stream_>>>(
+            result1.data(), result1.data(), context_->ntt_table_->data(),
+            context_->modulus_->data(), context_->n_power);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
-        result1.rescale_required_ = true;
-        rescale_inplace(result1, options);
-        result0.encoding_ = encoding::SLOT;
-        result1.encoding_ = encoding::SLOT;
+        result0.encoding_ = encoding::slot;
+        result1.encoding_ = encoding::slot;
 
         std::vector<Ciphertext<Scheme::CKKS>> result;
         result.push_back(std::move(result0));
@@ -3592,115 +3335,19 @@ namespace heongpu
 
     __host__ std::vector<Ciphertext<Scheme::CKKS>>
     HEOperator<Scheme::CKKS>::coeff_to_slot(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        CKKSEncodingTransformContext& transform_context,
+        Ciphertext<Scheme::CKKS>& cipher,
+        const Galoiskey<Scheme::CKKS>& galois_key,
         const ExecutionOptions& options)
     {
-        if (!transform_context.generated_)
-        {
-            throw std::invalid_argument(
-                "Encoding transform context is not generated!");
-        }
+        cipher.validate_context(context_);
 
-        if (cipher.encoding_ != encoding::COEFFICIENT)
+        if (cipher.encoding_ != encoding::coefficient)
         {
             throw std::invalid_argument(
                 "coeff_to_slot expects coefficient-encoded ciphertext.");
         }
 
-        if (cipher.depth_ != transform_context.CtoS_level_)
-        {
-            throw std::logic_error(
-                "coeff_to_slot input level does not match "
-                "transform_context.CtoS_start_level");
-        }
-
-        double old_scale_boot = scale_boot_;
-        scale_boot_ = transform_context.scale_boot_;
-
-        try
-        {
-            Ciphertext<Scheme::CKKS> c1;
-            if (transform_context.less_key_mode_)
-            {
-                c1 = multiply_matrix_less_memory(
-                    cipher, transform_context.V_inv_matrixs_rotated_encoded_,
-                    transform_context.diags_matrices_inv_bsgs_,
-                    transform_context.real_shift_n2_inv_bsgs_, galois_key,
-                    options);
-            }
-            else
-            {
-                c1 = multiply_matrix(
-                    cipher, transform_context.V_inv_matrixs_rotated_encoded_,
-                    transform_context.diags_matrices_inv_bsgs_, galois_key,
-                    options);
-            }
-
-            Ciphertext<Scheme::CKKS> c2 =
-                operator_ciphertext(0, options.stream_);
-            conjugate(c1, c2, galois_key, options);
-
-            Ciphertext<Scheme::CKKS> result0 =
-                operator_ciphertext(0, options.stream_);
-            add(c1, c2, result0, options);
-
-            double constant_1over2 = 0.5 * transform_context.scale_boot_;
-            int current_decomp_count = context_->Q_size - result0.depth_;
-            cipher_constant_plain_multiplication_kernel<<<
-                dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-                options.stream_>>>(result0.data(), constant_1over2,
-                                   result0.data(), context_->modulus_->data(),
-                                   two_pow_64_, context_->n_power);
-            result0.scale_ = result0.scale_ * transform_context.scale_boot_;
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-            result0.rescale_required_ = true;
-            rescale_inplace(result0, options);
-
-            Ciphertext<Scheme::CKKS> result1 =
-                operator_ciphertext(0, options.stream_);
-            sub(c1, c2, result1, options);
-
-            current_decomp_count = context_->Q_size - result1.depth_;
-            cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                     current_decomp_count, 2),
-                                                256, 0, options.stream_>>>(
-                result1.data(),
-                transform_context.encoded_complex_minus_iover2_.data(),
-                result1.data(), context_->modulus_->data(), context_->n_power);
-            result1.scale_ = result1.scale_ * transform_context.scale_boot_;
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-            result1.rescale_required_ = true;
-            rescale_inplace(result1, options);
-            result0.encoding_ = encoding::SLOT;
-            result1.encoding_ = encoding::SLOT;
-
-            std::vector<Ciphertext<Scheme::CKKS>> result;
-            result.push_back(std::move(result0));
-            result.push_back(std::move(result1));
-
-            scale_boot_ = old_scale_boot;
-            return result;
-        }
-        catch (...)
-        {
-            scale_boot_ = old_scale_boot;
-            throw;
-        }
-    }
-
-    __host__ std::vector<Ciphertext<Scheme::CKKS>>
-    HEOperator<Scheme::CKKS>::coeff_to_slot_v2(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        const ExecutionOptions& options)
-    {
-        if (cipher.encoding_ != encoding::COEFFICIENT)
-        {
-            throw std::invalid_argument(
-                "coeff_to_slot_v2 expects coefficient-encoded ciphertext.");
-        }
-
-        Ciphertext<Scheme::CKKS> c1 = multiply_matrix_v2(
+        Ciphertext<Scheme::CKKS> c1 = multiply_matrix(
             cipher, V_inv_matrixs_rotated_encoded_, diags_matrices_inv_bsgs_,
             diags_matrices_inv_bsgs_rot_n1_, diags_matrices_inv_bsgs_rot_n2_,
             galois_key, options);
@@ -3724,8 +3371,8 @@ namespace heongpu
             result1.data(), result1.data(), context_->ntt_table_->data(),
             context_->modulus_->data(), context_->n_power);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
-        result0.encoding_ = encoding::SLOT;
-        result1.encoding_ = encoding::SLOT;
+        result0.encoding_ = encoding::slot;
+        result1.encoding_ = encoding::slot;
 
         std::vector<Ciphertext<Scheme::CKKS>> result;
         result.push_back(std::move(result0));
@@ -3736,28 +3383,20 @@ namespace heongpu
 
     __host__ Ciphertext<Scheme::CKKS>
     HEOperator<Scheme::CKKS>::solo_coeff_to_slot(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
+        Ciphertext<Scheme::CKKS>& cipher,
+        const Galoiskey<Scheme::CKKS>& galois_key,
         const ExecutionOptions& options)
     {
-        if (cipher.encoding_ != encoding::COEFFICIENT)
+        if (cipher.encoding_ != encoding::coefficient)
         {
-            throw std::invalid_argument(
-                "solo_coeff_to_slot expects coefficient-encoded ciphertext.");
+            throw std::invalid_argument("solo_coeff_to_slot expects "
+                                        "coefficient-encoded ciphertext.");
         }
 
-        Ciphertext<Scheme::CKKS> c1;
-        if (less_key_mode_)
-        {
-            c1 = multiply_matrix_less_memory(
-                cipher, V_inv_matrixs_rotated_encoded_,
-                diags_matrices_inv_bsgs_, real_shift_n2_inv_bsgs_, galois_key,
-                options);
-        }
-        else
-        {
-            c1 = multiply_matrix(cipher, V_inv_matrixs_rotated_encoded_,
-                                 diags_matrices_inv_bsgs_, galois_key, options);
-        }
+        Ciphertext<Scheme::CKKS> c1 = multiply_matrix(
+            cipher, V_inv_matrixs_rotated_encoded_, diags_matrices_inv_bsgs_,
+            diags_matrices_inv_bsgs_rot_n1_, diags_matrices_inv_bsgs_rot_n2_,
+            galois_key, options);
 
         Ciphertext<Scheme::CKKS> c2 = operator_ciphertext(0, options.stream_);
         conjugate(c1, c2, galois_key, options); // conjugate
@@ -3765,88 +3404,30 @@ namespace heongpu
         Ciphertext<Scheme::CKKS> result =
             operator_ciphertext(0, options.stream_);
         add(c1, c2, result, options);
-
-        double constant_1over2 = 0.5 * scale_boot_;
-        int current_decomp_count = context_->Q_size - result.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(result.data(), constant_1over2, result.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        result.scale_ = result.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        result.rescale_required_ = true;
-        rescale_inplace(result, options);
-        result.encoding_ = encoding::SLOT;
+        result.encoding_ = encoding::slot;
 
         return result;
     }
 
     __host__ Ciphertext<Scheme::CKKS> HEOperator<Scheme::CKKS>::slot_to_coeff(
         Ciphertext<Scheme::CKKS>& cipher0, Ciphertext<Scheme::CKKS>& cipher1,
-        Galoiskey<Scheme::CKKS>& galois_key, const ExecutionOptions& options)
-    {
-        if ((cipher0.encoding_ != encoding::SLOT) ||
-            (cipher1.encoding_ != encoding::SLOT))
-        {
-            throw std::invalid_argument(
-                "slot_to_coeff expects slot-encoded ciphertext inputs.");
-        }
-
-        cudaStream_t old_stream = cipher1.stream();
-        cipher1.switch_stream(
-            options.stream_); // TODO: Change copy and assign structure!
-        Ciphertext<Scheme::CKKS> result;
-        result = cipher1;
-        cipher1.switch_stream(
-            old_stream); // TODO: Change copy and assign structure!
-
-        int current_decomp_count = context_->Q_size - cipher1.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            result.data(), encoded_complex_i_.data(), result.data(),
-            context_->modulus_->data(), context_->n_power);
-        result.scale_ = result.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        result.rescale_required_ = true;
-        rescale_inplace(result, options);
-
-        mod_drop_inplace(cipher0, options);
-
-        add(result, cipher0, result, options);
-
-        Ciphertext<Scheme::CKKS> c1;
-        if (less_key_mode_)
-        {
-            c1 = multiply_matrix_less_memory(
-                result, V_matrixs_rotated_encoded_, diags_matrices_bsgs_,
-                real_shift_n2_bsgs_, galois_key, options);
-        }
-        else
-        {
-            c1 = multiply_matrix(result, V_matrixs_rotated_encoded_,
-                                 diags_matrices_bsgs_, galois_key, options);
-        }
-        c1.encoding_ = encoding::COEFFICIENT;
-
-        return c1;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS> HEOperator<Scheme::CKKS>::slot_to_coeff(
-        Ciphertext<Scheme::CKKS>& cipher0, Ciphertext<Scheme::CKKS>& cipher1,
-        Galoiskey<Scheme::CKKS>& galois_key,
+        const Galoiskey<Scheme::CKKS>& galois_key,
         CKKSEncodingTransformContext& transform_context,
         const ExecutionOptions& options)
     {
+        require_manual("slot_to_coeff");
+
+        cipher0.validate_context(context_);
+        cipher1.validate_context(context_);
+
         if (!transform_context.generated_)
         {
             throw std::invalid_argument(
                 "Encoding transform context is not generated!");
         }
 
-        if ((cipher0.encoding_ != encoding::SLOT) ||
-            (cipher1.encoding_ != encoding::SLOT))
+        if ((cipher0.encoding_ != encoding::slot) ||
+            (cipher1.encoding_ != encoding::slot))
         {
             throw std::invalid_argument(
                 "slot_to_coeff expects slot-encoded ciphertext inputs.");
@@ -3854,79 +3435,55 @@ namespace heongpu
 
         if (cipher0.depth_ != cipher1.depth_)
         {
-            throw std::logic_error(
-                "slot_to_coeff expects equal levels for both slot ciphertexts.");
+            throw std::logic_error("slot_to_coeff expects equal levels for "
+                                   "both slot ciphertexts.");
         }
 
         if (cipher0.depth_ != transform_context.StoC_level_)
         {
-            throw std::logic_error(
-                "slot_to_coeff input level does not match "
-                "transform_context.StoC_start_level");
+            throw std::logic_error("slot_to_coeff input level does not match "
+                                   "transform_context.StoC_start_level");
         }
 
-        double old_scale_boot = scale_boot_;
-        scale_boot_ = transform_context.scale_boot_;
+        cudaStream_t old_stream = cipher1.stream();
+        cipher1.switch_stream(options.stream_);
+        Ciphertext<Scheme::CKKS> result;
+        result = cipher1;
+        cipher1.switch_stream(old_stream);
 
-        try
-        {
-            cudaStream_t old_stream = cipher1.stream();
-            cipher1.switch_stream(options.stream_);
-            Ciphertext<Scheme::CKKS> result;
-            result = cipher1;
-            cipher1.switch_stream(old_stream);
+        int current_decomp_count = context_->Q_size - cipher1.depth_;
+        cipher_mult_by_i_kernel<<<dim3((context_->n >> 8), current_decomp_count,
+                                       2),
+                                  256, 0, options.stream_>>>(
+            result.data(), result.data(), context_->ntt_table_->data(),
+            context_->modulus_->data(), context_->n_power);
+        HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-            int current_decomp_count = context_->Q_size - cipher1.depth_;
-            cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                     current_decomp_count, 2),
-                                                256, 0, options.stream_>>>(
-                result.data(), transform_context.encoded_complex_i_.data(),
-                result.data(), context_->modulus_->data(), context_->n_power);
-            result.scale_ = result.scale_ * transform_context.scale_boot_;
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-            result.rescale_required_ = true;
-            rescale_inplace(result, options);
+        add(result, cipher0, result, options);
 
-            mod_drop_inplace(cipher0, options);
-            add(result, cipher0, result, options);
+        Ciphertext<Scheme::CKKS> c1 = multiply_matrix(
+            result, transform_context.V_matrixs_rotated_encoded_,
+            transform_context.diags_matrices_bsgs_,
+            transform_context.diags_matrices_bsgs_rot_n1_,
+            transform_context.diags_matrices_bsgs_rot_n2_, galois_key, options);
+        c1.encoding_ = encoding::coefficient;
 
-            Ciphertext<Scheme::CKKS> c1;
-            if (transform_context.less_key_mode_)
-            {
-                c1 = multiply_matrix_less_memory(
-                    result, transform_context.V_matrixs_rotated_encoded_,
-                    transform_context.diags_matrices_bsgs_,
-                    transform_context.real_shift_n2_bsgs_, galois_key, options);
-            }
-            else
-            {
-                c1 = multiply_matrix(
-                    result, transform_context.V_matrixs_rotated_encoded_,
-                    transform_context.diags_matrices_bsgs_, galois_key,
-                    options);
-            }
-            c1.encoding_ = encoding::COEFFICIENT;
-
-            scale_boot_ = old_scale_boot;
-            return c1;
-        }
-        catch (...)
-        {
-            scale_boot_ = old_scale_boot;
-            throw;
-        }
+        return c1;
     }
 
-    __host__ Ciphertext<Scheme::CKKS>
-    HEOperator<Scheme::CKKS>::slot_to_coeff_v2(
+    __host__ Ciphertext<Scheme::CKKS> HEOperator<Scheme::CKKS>::slot_to_coeff(
         Ciphertext<Scheme::CKKS>& cipher0, Ciphertext<Scheme::CKKS>& cipher1,
-        Galoiskey<Scheme::CKKS>& galois_key, const ExecutionOptions& options)
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const ExecutionOptions& options)
     {
-        if ((cipher0.encoding_ != encoding::SLOT) ||
-            (cipher1.encoding_ != encoding::SLOT))
+        cipher0.validate_context(context_);
+        cipher1.validate_context(context_);
+
+        if ((cipher0.encoding_ != encoding::slot) ||
+            (cipher1.encoding_ != encoding::slot))
         {
             throw std::invalid_argument(
-                "slot_to_coeff_v2 expects slot-encoded ciphertext inputs.");
+                "slot_to_coeff expects slot-encoded ciphertext inputs.");
         }
 
         cudaStream_t old_stream = cipher1.stream();
@@ -3948,38 +3505,31 @@ namespace heongpu
 
         add(result, cipher0, result, options);
 
-        Ciphertext<Scheme::CKKS> c1 = multiply_matrix_v2(
-            result, V_matrixs_rotated_encoded_, diags_matrices_bsgs_,
-            diags_matrices_bsgs_rot_n1_, diags_matrices_bsgs_rot_n2_,
-            galois_key, options);
-        c1.encoding_ = encoding::COEFFICIENT;
+        Ciphertext<Scheme::CKKS> c1 =
+            multiply_matrix(result, V_matrixs_rotated_encoded_,
+                            diags_matrices_bsgs_, diags_matrices_bsgs_rot_n1_,
+                            diags_matrices_bsgs_rot_n2_, galois_key, options);
+        c1.encoding_ = encoding::coefficient;
         return c1;
     }
 
     __host__ Ciphertext<Scheme::CKKS>
     HEOperator<Scheme::CKKS>::solo_slot_to_coeff(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
+        const Ciphertext<Scheme::CKKS>& cipher,
+        const Galoiskey<Scheme::CKKS>& galois_key,
         const ExecutionOptions& options)
     {
-        if (cipher.encoding_ != encoding::SLOT)
+        if (cipher.encoding_ != encoding::slot)
         {
             throw std::invalid_argument(
                 "solo_slot_to_coeff expects slot-encoded ciphertext.");
         }
 
-        Ciphertext<Scheme::CKKS> result;
-        if (less_key_mode_)
-        {
-            result = multiply_matrix_less_memory(
-                cipher, V_matrixs_rotated_encoded_, diags_matrices_bsgs_,
-                real_shift_n2_bsgs_, galois_key, options);
-        }
-        else
-        {
-            result = multiply_matrix(cipher, V_matrixs_rotated_encoded_,
-                                     diags_matrices_bsgs_, galois_key, options);
-        }
-        result.encoding_ = encoding::COEFFICIENT;
+        Ciphertext<Scheme::CKKS> result =
+            multiply_matrix(cipher, V_matrixs_rotated_encoded_,
+                            diags_matrices_bsgs_, diags_matrices_bsgs_rot_n1_,
+                            diags_matrices_bsgs_rot_n2_, galois_key, options);
+        result.encoding_ = encoding::coefficient;
 
         return result;
     }
@@ -3998,8 +3548,8 @@ namespace heongpu
         {
             cipher_after_ks =
                 operator_ciphertext(cipher.scale(), options.stream_);
-            switchkey_ckks_method_II(cipher, cipher_after_ks,
-                                     *swk_dense_to_sparse, options.stream_);
+            switchkey_ckks(cipher, cipher_after_ks, *swk_dense_to_sparse,
+                           options.stream_);
         }
         else
         {
@@ -4050,8 +3600,8 @@ namespace heongpu
 
         if (swk_sparse_to_dense != nullptr)
         {
-            switchkey_ckks_method_II(c_raised, c_raised, *swk_sparse_to_dense,
-                                     options.stream_);
+            switchkey_ckks(c_raised, c_raised, *swk_sparse_to_dense,
+                           options.stream_);
         }
 
         c_raised.encoding_ = cipher.encoding_;
@@ -4060,221 +3610,20 @@ namespace heongpu
     }
 
     __host__ Ciphertext<Scheme::CKKS>
-    HEOperator<Scheme::CKKS>::exp_scaled(Ciphertext<Scheme::CKKS>& cipher,
-                                         Relinkey<Scheme::CKKS>& relin_key,
-                                         const ExecutionOptions& options)
+    HEOperator<Scheme::CKKS>::eval_mod(Ciphertext<Scheme::CKKS>& cipher,
+                                       const Relinkey<Scheme::CKKS>& relin_key,
+                                       const ExecutionOptions& options)
     {
-        int current_decomp_count = context_->Q_size - cipher.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            cipher.data(), encoded_complex_iscaleoverr_.data(), cipher.data(),
-            context_->modulus_->data(), context_->n_power);
-        cipher.scale_ = cipher.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        cipher.rescale_required_ = true;
-        rescale_inplace(cipher, options);
-
-        Ciphertext<Scheme::CKKS> cipher_taylor =
-            exp_taylor_approximation(cipher, relin_key, options);
-
-        for (int i = 0; i < taylor_number_; i++)
-        {
-            multiply_inplace(cipher_taylor, cipher_taylor, options);
-            relinearize_inplace(cipher_taylor, relin_key, options);
-            rescale_inplace(cipher_taylor, options);
-        }
-
-        return cipher_taylor;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HEOperator<Scheme::CKKS>::exp_taylor_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Relinkey<Scheme::CKKS>& relin_key,
-        const ExecutionOptions& options)
-    {
-        cudaStream_t old_stream = cipher.stream();
-        cipher.switch_stream(
-            options.stream_); // TODO: Change copy and assign structure!
-        Ciphertext<Scheme::CKKS> second;
-        second = cipher; // 1 - c^1
-
-        Ciphertext<Scheme::CKKS> third =
-            operator_ciphertext(0, options.stream_);
-        multiply(second, second, third, options);
-        relinearize_inplace(third, relin_key, options);
-        rescale_inplace(third, options); // 2 - c^2
-
-        mod_drop_inplace(second, options); // 2
-        Ciphertext<Scheme::CKKS> forth =
-            operator_ciphertext(0, options.stream_);
-        multiply(third, second, forth, options);
-        relinearize_inplace(forth, relin_key, options);
-        rescale_inplace(forth, options); // 3 - c^3
-
-        Ciphertext<Scheme::CKKS> fifth =
-            operator_ciphertext(0, options.stream_);
-        multiply(third, third, fifth, options);
-        relinearize_inplace(fifth, relin_key, options);
-        rescale_inplace(fifth, options); // 3 - c^4
-
-        mod_drop_inplace(second, options); // 3
-        Ciphertext<Scheme::CKKS> sixth =
-            operator_ciphertext(0, options.stream_);
-        multiply(fifth, second, sixth, options);
-        relinearize_inplace(sixth, relin_key, options);
-        rescale_inplace(sixth, options); // 4 - c^5
-
-        Ciphertext<Scheme::CKKS> seventh =
-            operator_ciphertext(0, options.stream_);
-        multiply(forth, forth, seventh, options);
-        relinearize_inplace(seventh, relin_key, options);
-        rescale_inplace(seventh, options); // 4 - c^6
-
-        Ciphertext<Scheme::CKKS> eighth =
-            operator_ciphertext(0, options.stream_);
-        multiply(fifth, forth, eighth, options);
-        relinearize_inplace(eighth, relin_key, options);
-        rescale_inplace(eighth, options); // 4 - c^7
-
-        //
-
-        double constant_1over2 = 0.5 * scale_boot_;
-        int current_decomp_count = context_->Q_size - third.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(third.data(), constant_1over2, third.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        third.scale_ = third.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        third.rescale_required_ = true;
-        rescale_inplace(third, options); // 3
-
-        //
-
-        double constant_1over6 = (1.0 / 6.0) * scale_boot_;
-        current_decomp_count = context_->Q_size - forth.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(forth.data(), constant_1over6, forth.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        forth.scale_ = forth.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        forth.rescale_required_ = true;
-        rescale_inplace(forth, options); // 4
-
-        //
-
-        double constant_1over24 = (1.0 / 24.0) * scale_boot_;
-        current_decomp_count = context_->Q_size - fifth.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(fifth.data(), constant_1over24, fifth.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        fifth.scale_ = fifth.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        fifth.rescale_required_ = true;
-        rescale_inplace(fifth, options); // 4
-
-        //
-
-        double constant_1over120 = (1.0 / 120.0) * scale_boot_;
-        current_decomp_count = context_->Q_size - sixth.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(sixth.data(), constant_1over120, sixth.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        sixth.scale_ = sixth.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        sixth.rescale_required_ = true;
-        rescale_inplace(sixth, options); // 5
-
-        //
-
-        double constant_1over720 = (1.0 / 720.0) * scale_boot_;
-        current_decomp_count = context_->Q_size - seventh.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(seventh.data(), constant_1over720,
-                               seventh.data(), context_->modulus_->data(),
-                               two_pow_64_, context_->n_power);
-        seventh.scale_ = seventh.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        seventh.rescale_required_ = true;
-        rescale_inplace(seventh, options); // 5
-
-        //
-
-        double constant_1over5040 = (1.0 / 5040.0) * scale_boot_;
-        current_decomp_count = context_->Q_size - eighth.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(eighth.data(), constant_1over5040, eighth.data(),
-                               context_->modulus_->data(), two_pow_64_,
-                               context_->n_power);
-        eighth.scale_ = eighth.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        eighth.rescale_required_ = true;
-        rescale_inplace(eighth, options); // 5
-
-        //
-
-        double constant_1 = 1.0 * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - second.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            second.data(), constant_1, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = second.depth_;
-        result.scale_ = second.scale_;
-        result.in_ntt_domain_ = second.in_ntt_domain_;
-        result.encoding_ = second.encoding_;
-        result.rescale_required_ = second.rescale_required_;
-        result.relinearization_required_ = second.relinearization_required_;
-        result.ciphertext_generated_ = true;
-
-        //
-
-        add_inplace(result, third, options); // 3
-
-        //
-
-        mod_drop_inplace(result, options); // 4
-
-        //
-
-        add_inplace(result, forth, options); // 4
-        add_inplace(result, fifth, options); // 4
-
-        //
-
-        mod_drop_inplace(result, options); // 5
-
-        //
-
-        add_inplace(result, sixth, options); // 5
-        add_inplace(result, seventh, options); // 5
-        add_inplace(result, eighth, options); // 5
-
-        return result;
+        return eval_mod(cipher, sine_poly_,
+                        -0.5 / (std::pow(2.0, eval_mod_config_.double_angle_) *
+                                (sine_poly_.b_ - sine_poly_.a_)),
+                        relin_key, options);
     }
 
     __host__ Ciphertext<Scheme::CKKS>
     HEOperator<Scheme::CKKS>::eval_mod(Ciphertext<Scheme::CKKS>& cipher,
-                                       Relinkey<Scheme::CKKS>& relin_key,
+                                       const Polynomial& poly, double shift,
+                                       const Relinkey<Scheme::CKKS>& relin_key,
                                        const ExecutionOptions& options)
     {
         double prev_scale = cipher.scale_;
@@ -4284,21 +3633,16 @@ namespace heongpu
         double target_scale = eval_mod_config_.scaling_factor_;
         for (int i = 0; i < eval_mod_config_.double_angle_; i++)
         {
-            int modulus_index = eval_mod_config_.level_start_ -
-                                sine_poly_.depth() -
+            int modulus_index = eval_mod_config_.level_start_ - poly.depth() -
                                 eval_mod_config_.double_angle_ + i + 1;
             Data64 qi = context_->prime_vector_[modulus_index].value;
             target_scale = std::sqrt(target_scale * static_cast<double>(qi));
         }
 
-        add_plain_inplace(cipher_taylor,
-                          -0.5 /
-                              (std::pow(2.0, eval_mod_config_.double_angle_) *
-                               (sine_poly_.b_ - sine_poly_.a_)),
-                          options);
+        add_plain_inplace(cipher_taylor, shift, options);
 
-        cipher_taylor = evaluate_poly(cipher_taylor, target_scale, sine_poly_,
-                                      relin_key, options);
+        cipher_taylor = evaluate_poly(cipher_taylor, target_scale, scale_boot_,
+                                      poly, relin_key, options);
 
         double sqrt2pi = eval_mod_config_.sqrt2pi_;
         for (int i = 0; i < eval_mod_config_.double_angle_; i++)
@@ -4307,8 +3651,8 @@ namespace heongpu
             multiply_inplace(cipher_taylor, cipher_taylor, options);
             relinearize_inplace(cipher_taylor, relin_key, options);
             add_inplace(cipher_taylor, cipher_taylor, options);
-            add_plain_v2(cipher_taylor, Complex64(-sqrt2pi, 0.0), cipher_taylor,
-                         options);
+            add_plain_complex(cipher_taylor, Complex64(-sqrt2pi, 0.0),
+                              cipher_taylor, options);
             rescale_inplace(cipher_taylor, options);
         }
 
@@ -4318,7 +3662,8 @@ namespace heongpu
 
     __host__ void HEOperator<Scheme::CKKS>::gen_power(
         std::unordered_map<int, Ciphertext<Scheme::CKKS>>& cipher, int power,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
+        PolyType type, const Relinkey<Scheme::CKKS>& relin_key,
+        const ExecutionOptions& options)
     {
         if (cipher.count(power))
         {
@@ -4339,14 +3684,14 @@ namespace heongpu
             a = (1 << k) - 1;
             b = power + 1 - (1 << k);
 
-            if (eval_mod_config_.poly_type_ == PolyType::CHEBYSHEV)
+            if (type == PolyType::chebyshev)
             {
                 c = std::abs(a - b);
             }
         }
 
-        gen_power(cipher, a, relin_key, options);
-        gen_power(cipher, b, relin_key, options);
+        gen_power(cipher, a, type, relin_key, options);
+        gen_power(cipher, b, type, relin_key, options);
 
         int x = cipher[a].level();
         int y = cipher[b].level();
@@ -4379,45 +3724,42 @@ namespace heongpu
         relinearize_inplace(cipher[power], relin_key, options);
         rescale_inplace(cipher[power], options);
 
-        if (eval_mod_config_.poly_type_ == PolyType::CHEBYSHEV)
+        if (type == PolyType::chebyshev)
         {
             add_inplace(cipher[power], cipher[power], options);
             if (c == 0)
             {
-                add_plain_v2(cipher[power], Complex64(-1.0, 0.0), cipher[power],
-                             options);
+                add_plain_complex(cipher[power], Complex64(-1.0, 0.0),
+                                  cipher[power], options);
             }
             else
             {
-                gen_power(cipher, c, relin_key, options);
+                gen_power(cipher, c, type, relin_key, options);
 
-                int x = cipher[power].level();
-                int y = cipher[c].level();
-                if (x != y)
+                // T_c has a level more than the product. Multiplying it by 1
+                // at the scale that a rescale turns into the scale of the
+                // product makes both scales equal, which mod_drop does not.
+                Ciphertext<Scheme::CKKS> tc = cipher[c];
+                while (tc.level() > cipher[power].level() + 1)
                 {
-                    Ciphertext<Scheme::CKKS> tmp = cipher[c];
-                    Ciphertext<Scheme::CKKS> tmp1 = cipher[power];
-
-                    if (x < y)
-                    {
-                        for (int i = x; i < y; i++)
-                        {
-                            mod_drop_inplace(tmp, options);
-                        }
-                    }
-                    else
-                    {
-                        for (int i = y; i < x; i++)
-                        {
-                            mod_drop_inplace(tmp1, options);
-                        }
-                    }
-                    sub(tmp1, tmp, cipher[power], options);
+                    mod_drop_inplace(tc, options);
                 }
-                else
+                if (tc.level() == cipher[power].level() + 1)
                 {
-                    sub_inplace(cipher[power], cipher[c], options);
+                    double qi = static_cast<double>(
+                        context_->prime_vector_[tc.level()].value);
+                    Ciphertext<Scheme::CKKS> scaled(context_, options);
+                    multiply_plain(tc, 1.0, scaled,
+                                   cipher[power].scale_ * qi / tc.scale_,
+                                   options);
+                    rescale_inplace(scaled, options);
+                    tc = std::move(scaled);
                 }
+                while (cipher[power].level() > tc.level())
+                {
+                    mod_drop_inplace(cipher[power], options);
+                }
+                sub_inplace(cipher[power], tc, options);
             }
         }
 
@@ -4441,6 +3783,7 @@ namespace heongpu
         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
         result.scheme_ = context_->scheme_;
+        result.context_id_ = context_->context_id_;
         result.ring_size_ = context_->n;
         result.coeff_modulus_count_ = context_->Q_size;
         result.cipher_size_ = 2;
@@ -4448,22 +3791,22 @@ namespace heongpu
         ;
         result.scale_ = target_scale;
         result.in_ntt_domain_ = true;
-        result.encoding_ = encoding::SLOT;
+        result.encoding_ = encoding::slot;
         result.rescale_required_ = true;
         result.relinearization_required_ = false;
         result.ciphertext_generated_ = true;
 
-        add_plain_v2(result, pol.coeffs_[0], result, options);
+        add_plain_complex(result, pol.coeffs_[0], result, options);
 
         for (int i = 1; i <= pol.degree(); i++)
         {
             Ciphertext<Scheme::CKKS> xi_term = powered_ciphers[i];
 
-            DeviceVector<Data64> encoded_coeff_i(context_->Q_size
-                                                 << context_->n_power);
-            quick_ckks_encoder_constant_complex(pol.coeffs_[i],
-                                                encoded_coeff_i.data(),
-                                                target_scale / xi_term.scale_);
+            DeviceVector<Data64> encoded_coeff_i(
+                context_->Q_size << context_->n_power, options.stream_);
+            quick_ckks_encoder_constant_complex(
+                pol.coeffs_[i], encoded_coeff_i.data(),
+                target_scale / xi_term.scale_, options.stream_);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
 
             int current_decomp_count = context_->Q_size - xi_term.depth_;
@@ -4472,9 +3815,7 @@ namespace heongpu
                                                 256, 0, options.stream_>>>(
                 xi_term.data(), encoded_coeff_i.data(), xi_term.data(),
                 context_->modulus_->data(), context_->n_power);
-            xi_term.scale_ = xi_term.scale_ *
-                             static_cast<double>(
-                                 context_->prime_vector_[target_level].value);
+            xi_term.scale_ = target_scale;
             HEONGPU_CUDA_CHECK(cudaGetLastError());
 
             int a = result.level();
@@ -4512,10 +3853,11 @@ namespace heongpu
 
     __host__ Ciphertext<Scheme::CKKS>
     HEOperator<Scheme::CKKS>::evaluate_poly_recurse(
-        int target_level, double target_scale, const Polynomial& pol,
-        int log_split,
+        int target_level, double target_scale, double base_scale,
+        const Polynomial& pol, int log_split,
         std::unordered_map<int, Ciphertext<Scheme::CKKS>>& powered_ciphers,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
+        const Relinkey<Scheme::CKKS>& relin_key,
+        const ExecutionOptions& options)
     {
         int degree = pol.degree();
         int split = 1 << log_split;
@@ -4527,9 +3869,9 @@ namespace heongpu
                  (1 << (log_split - 1))))
             {
                 int log_degree = std::ceil(std::log2(degree));
-                return evaluate_poly_recurse(target_level, target_scale, pol,
-                                             log_degree >> 1, powered_ciphers,
-                                             relin_key, options);
+                return evaluate_poly_recurse(
+                    target_level, target_scale, base_scale, pol,
+                    log_degree >> 1, powered_ciphers, relin_key, options);
             }
 
             if (pol.lead_)
@@ -4566,10 +3908,10 @@ namespace heongpu
                                    powered_ciphers[next_power].scale_;
 
         Ciphertext<Scheme::CKKS> result_q = evaluate_poly_recurse(
-            target_level + 1, next_target_scale, coeff_sq, log_split,
-            powered_ciphers, relin_key, options);
+            target_level + 1, next_target_scale, base_scale, coeff_sq,
+            log_split, powered_ciphers, relin_key, options);
 
-        if (result_q.scale_ >= scale_boot_ / 2)
+        if (result_q.scale_ >= base_scale / 2)
         {
             rescale_inplace(result_q, options);
         }
@@ -4605,7 +3947,7 @@ namespace heongpu
         // rescale_inplace(result_q, options);
 
         Ciphertext<Scheme::CKKS> result_r = evaluate_poly_recurse(
-            result_q.level(), result_q.scale_, coeff_sr, log_split,
+            result_q.level(), result_q.scale_, base_scale, coeff_sr, log_split,
             powered_ciphers, relin_key, options);
 
         int a = result_q.level();
@@ -4655,7 +3997,8 @@ namespace heongpu
 
     __host__ Ciphertext<Scheme::CKKS> HEOperator<Scheme::CKKS>::evaluate_poly(
         Ciphertext<Scheme::CKKS>& cipher, double target_scale,
-        const Polynomial& pol, Relinkey<Scheme::CKKS>& relin_key,
+        double base_scale, const Polynomial& pol,
+        const Relinkey<Scheme::CKKS>& relin_key,
         const ExecutionOptions& options)
     {
         cudaStream_t old_stream = cipher.stream();
@@ -4666,27 +4009,27 @@ namespace heongpu
 
         // BSGS optimization: calculate optimal split point
         int poly_degree = pol.degree();
-        int log_degree = std::ceil(std::log2(poly_degree));
+        int log_degree = std::ceil(std::log2(poly_degree + 1));
         int log_split = optimal_split(log_degree);
 
         // Baby-step: Generate powers x^1, x^2, ..., x^(2^logSplit - 1)
         for (int power = (1 << log_split) - 1; power >= 1; power--)
         {
-            gen_power(powered_ciphers, power, relin_key, options);
+            gen_power(powered_ciphers, power, pol.type_, relin_key, options);
         }
 
         // Giant-step: Generate powers x^(2^logSplit), x^(2^(logSplit+1)), ...,
         // x^(2^(logDegree-1))
         for (int i = log_split; i < log_degree; i++)
         {
-            gen_power(powered_ciphers, 1 << i, relin_key, options);
+            gen_power(powered_ciphers, 1 << i, pol.type_, relin_key, options);
         }
 
         int initial_target_level = cipher.level() - log_degree + 1;
 
         Ciphertext<Scheme::CKKS> result = evaluate_poly_recurse(
-            initial_target_level, target_scale, pol, log_split, powered_ciphers,
-            relin_key, options);
+            initial_target_level, target_scale, base_scale, pol, log_split,
+            powered_ciphers, relin_key, options);
 
         Data64 qi = context_->prime_vector_[result.level()].value;
         if (result.scale_ / static_cast<double>(qi) >= target_scale / 2.0)
@@ -4697,956 +4040,144 @@ namespace heongpu
         return result;
     }
 
-    __host__ DeviceVector<Data64>
-    HEOperator<Scheme::CKKS>::fast_single_hoisting_rotation_ckks_method_I(
-        Ciphertext<Scheme::CKKS>& first_cipher, std::vector<int>& bsgs_shift,
-        int n1, Galoiskey<Scheme::CKKS>& galois_key, const cudaStream_t stream)
+    __host__ int HEOperator<Scheme::CKKS>::polynomial_depth(int degree,
+                                                            bool chebyshev,
+                                                            double a, double b)
     {
-        int current_level = first_cipher.depth_;
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - current_level;
-        int current_decomp_count = context_->Q_size - current_level;
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
-
-        DeviceVector<Data64> result((2 * current_decomp_count * n1)
-                                        << context_->n_power,
-                                    stream); // store n1 ciphertext
-
-        global_memory_replace_kernel<<<dim3((context_->n >> 8),
-                                            current_decomp_count, 2),
-                                       256, 0, stream>>>(
-            first_cipher.data(), result.data(), context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        //
-
-        for (int i = 1; i < n1; i++)
+        if (degree < 1)
         {
-            int shift_n1 = bsgs_shift[i];
-            int offset = ((2 * current_decomp_count) << context_->n_power) * i;
-
-            int galoiselt = steps_to_galois_elt(shift_n1, context_->n,
-                                                galois_key.group_order_);
-            bool key_exist =
-                (galois_key.storage_type_ == storage_type::DEVICE)
-                    ? (galois_key.device_location_.find(galoiselt) !=
-                       galois_key.device_location_.end())
-                    : (galois_key.host_location_.find(galoiselt) !=
-                       galois_key.host_location_.end());
-            if (key_exist)
-            {
-                int galois_elt = galoiselt;
-
-                gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-                    .n_power = context_->n_power,
-                    .ntt_type = gpuntt::INVERSE,
-                    .ntt_layout = gpuntt::PerPolynomial,
-                    .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                    .zero_padding = false,
-                    .mod_inverse = context_->n_inverse_->data(),
-                    .stream = stream};
-
-                gpuntt::GPU_INTT(
-                    first_cipher.data(), temp0_rotation,
-                    context_->intt_table_->data(), context_->modulus_->data(),
-                    cfg_intt, 2 * current_decomp_count, current_decomp_count);
-
-                // TODO: make it efficient
-                ckks_duplicate_kernel<<<dim3((context_->n >> 8),
-                                             current_decomp_count, 1),
-                                        256, 0, stream>>>(
-                    temp0_rotation, temp2_rotation, context_->modulus_->data(),
-                    context_->n_power, first_rns_mod_count,
-                    current_rns_mod_count, current_decomp_count);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                    .n_power = context_->n_power,
-                    .ntt_type = gpuntt::FORWARD,
-                    .ntt_layout = gpuntt::PerPolynomial,
-                    .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                    .zero_padding = false,
-                    .stream = stream};
-
-                int counter = first_rns_mod_count;
-                int location = 0;
-                for (int i = 0; i < first_cipher.depth_; i++)
-                {
-                    location += counter;
-                    counter--;
-                }
-                gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                    temp2_rotation, context_->ntt_table_->data(),
-                    context_->modulus_->data(), cfg_ntt,
-                    current_decomp_count * current_rns_mod_count,
-                    current_rns_mod_count, new_prime_locations + location);
-
-                // MultSum
-                // TODO: make it efficient
-                int iteration_count_1 = current_decomp_count / 4;
-                int iteration_count_2 = current_decomp_count % 4;
-                if (galois_key.storage_type_ == storage_type::DEVICE)
-                {
-                    keyswitch_multiply_accumulate_leveled_kernel<<<
-                        dim3((context_->n >> 8), current_rns_mod_count, 1), 256,
-                        0, stream>>>(
-                        temp2_rotation,
-                        galois_key.device_location_[galois_elt].data(),
-                        temp3_rotation, context_->modulus_->data(),
-                        first_rns_mod_count, current_decomp_count,
-                        iteration_count_1, iteration_count_2,
-                        context_->n_power);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-                }
-                else
-                {
-                    DeviceVector<Data64> key_location(
-                        galois_key.host_location_[galois_elt], stream);
-                    keyswitch_multiply_accumulate_leveled_kernel<<<
-                        dim3((context_->n >> 8), current_rns_mod_count, 1), 256,
-                        0, stream>>>(temp2_rotation, key_location.data(),
-                                     temp3_rotation, context_->modulus_->data(),
-                                     first_rns_mod_count, current_decomp_count,
-                                     iteration_count_1, iteration_count_2,
-                                     context_->n_power);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-                }
-
-                gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                    temp3_rotation, context_->intt_table_->data(),
-                    context_->modulus_->data(), cfg_intt,
-                    2 * current_rns_mod_count, current_rns_mod_count,
-                    new_prime_locations + location);
-
-                // ModDown + Permute
-                divide_round_lastq_permute_ckks_kernel<<<
-                    dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-                    stream>>>(
-                    temp3_rotation, temp0_rotation, result.data() + offset,
-                    context_->modulus_->data(), context_->half_p_->data(),
-                    context_->half_mod_->data(),
-                    context_->last_q_modinv_->data(), galois_elt,
-                    context_->n_power, current_rns_mod_count,
-                    current_decomp_count, first_rns_mod_count, context_->Q_size,
-                    context_->P_size);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                gpuntt::GPU_NTT_Inplace(
-                    result.data() + offset, context_->ntt_table_->data(),
-                    context_->modulus_->data(), cfg_ntt,
-                    2 * current_decomp_count, current_decomp_count);
-            }
-            else
-            {
-                std::vector<int> indexs = rotation_index_generator(
-                    shift_n1, galois_key.max_log_slot_, galois_key.max_shift_);
-                std::vector<int> required_galoiselt;
-                for (int index : indexs)
-                {
-                    if (!(galois_key.galois_elt.find(index) !=
-                          galois_key.galois_elt.end()))
-                    {
-                        throw std::logic_error("Galois key not present!");
-                    }
-                    required_galoiselt.push_back(galois_key.galois_elt[index]);
-                }
-
-                Data64* in_data = first_cipher.data();
-                for (auto& galois_elt : required_galoiselt)
-                {
-                    gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-                        .n_power = context_->n_power,
-                        .ntt_type = gpuntt::INVERSE,
-                        .ntt_layout = gpuntt::PerPolynomial,
-                        .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                        .zero_padding = false,
-                        .mod_inverse = context_->n_inverse_->data(),
-                        .stream = stream};
-
-                    gpuntt::GPU_INTT(
-                        in_data, temp0_rotation, context_->intt_table_->data(),
-                        context_->modulus_->data(), cfg_intt,
-                        2 * current_decomp_count, current_decomp_count);
-
-                    // TODO: make it efficient
-                    ckks_duplicate_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 1),
-                                            256, 0, stream>>>(
-                        temp0_rotation, temp2_rotation,
-                        context_->modulus_->data(), context_->n_power,
-                        first_rns_mod_count, current_rns_mod_count,
-                        current_decomp_count);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                        .n_power = context_->n_power,
-                        .ntt_type = gpuntt::FORWARD,
-                        .ntt_layout = gpuntt::PerPolynomial,
-                        .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                        .zero_padding = false,
-                        .stream = stream};
-
-                    int counter = first_rns_mod_count;
-                    int location = 0;
-                    for (int i = 0; i < first_cipher.depth_; i++)
-                    {
-                        location += counter;
-                        counter--;
-                    }
-                    gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                        temp2_rotation, context_->ntt_table_->data(),
-                        context_->modulus_->data(), cfg_ntt,
-                        current_decomp_count * current_rns_mod_count,
-                        current_rns_mod_count, new_prime_locations + location);
-
-                    // MultSum
-                    // TODO: make it efficient
-                    int iteration_count_1 = current_decomp_count / 4;
-                    int iteration_count_2 = current_decomp_count % 4;
-                    if (galois_key.storage_type_ == storage_type::DEVICE)
-                    {
-                        keyswitch_multiply_accumulate_leveled_kernel<<<
-                            dim3((context_->n >> 8), current_rns_mod_count, 1),
-                            256, 0, stream>>>(
-                            temp2_rotation,
-                            galois_key.device_location_[galois_elt].data(),
-                            temp3_rotation, context_->modulus_->data(),
-                            first_rns_mod_count, current_decomp_count,
-                            iteration_count_1, iteration_count_2,
-                            context_->n_power);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-                    }
-                    else
-                    {
-                        DeviceVector<Data64> key_location(
-                            galois_key.host_location_[galois_elt], stream);
-                        keyswitch_multiply_accumulate_leveled_kernel<<<
-                            dim3((context_->n >> 8), current_rns_mod_count, 1),
-                            256, 0, stream>>>(
-                            temp2_rotation, key_location.data(), temp3_rotation,
-                            context_->modulus_->data(), first_rns_mod_count,
-                            current_decomp_count, iteration_count_1,
-                            iteration_count_2, context_->n_power);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-                    }
-
-                    gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                        temp3_rotation, context_->intt_table_->data(),
-                        context_->modulus_->data(), cfg_intt,
-                        2 * current_rns_mod_count, current_rns_mod_count,
-                        new_prime_locations + location);
-
-                    // ModDown + Permute
-                    divide_round_lastq_permute_ckks_kernel<<<
-                        dim3((context_->n >> 8), current_decomp_count, 2), 256,
-                        0, stream>>>(
-                        temp3_rotation, temp0_rotation, result.data() + offset,
-                        context_->modulus_->data(), context_->half_p_->data(),
-                        context_->half_mod_->data(),
-                        context_->last_q_modinv_->data(), galois_elt,
-                        context_->n_power, current_rns_mod_count,
-                        current_decomp_count, first_rns_mod_count,
-                        context_->Q_size, context_->P_size);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    gpuntt::GPU_NTT_Inplace(
-                        result.data() + offset, context_->ntt_table_->data(),
-                        context_->modulus_->data(), cfg_ntt,
-                        2 * current_decomp_count, current_decomp_count);
-
-                    in_data = result.data() + offset;
-                }
-            }
+            throw ParameterError(error_message(
+                "Polynomial degree must be at least 1, got ", degree, "."));
         }
 
-        return result;
+        int depth = 0;
+        while ((1 << depth) <= degree)
+        {
+            depth++;
+        }
+        if (chebyshev && !(a == -1.0 && b == 1.0))
+        {
+            depth++;
+        }
+        return depth;
     }
 
-    // TODO: Fix it!
-    /*
-    __host__ DeviceVector<Data64>
-    HEOperator<Scheme::CKKS>::fast_single_hoisting_rotation_ckks_method_I(
-        Ciphertext<Scheme::CKKS>& first_cipher, std::vector<int>& bsgs_shift,
-        int n1, Galoiskey<Scheme::CKKS>& galois_key, const cudaStream_t stream)
+    __host__ Ciphertext<Scheme::CKKS>
+    HEOperator<Scheme::CKKS>::evaluate_in_basis(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const std::vector<double>& coefficients, PolyType type,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        const ExecutionOptions& options, double target_scale)
     {
-        int current_level = first_cipher.depth_;
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - current_level;
-        int current_decomp_count = context_->Q_size - current_level;
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) + (2 * context_->n *
-    context_->Q_size) + (context_->n * context_->Q_size *
-    context_->Q_prime_size) + (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation = temp0_rotation + (2 * context_->n *
-    context_->Q_size); Data64* temp2_rotation = temp1_rotation + (2 *
-    context_->n * context_->Q_size); Data64* temp3_rotation = temp2_rotation +
-    (context_->n * context_->Q_size * context_->Q_prime_size);
-
-        DeviceVector<Data64> result((2 * current_decomp_count * n1) <<
-    context_->n_power, stream); // store n1 ciphertext
-
-        // decompose and mult P
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT(first_cipher.data(), temp0_rotation,
-                        context_->intt_table_->data(),
-    context_->modulus_->data(), cfg_intt, 2 * current_decomp_count,
-    current_decomp_count);
-
-        // TODO: make it efficient
-        ckks_duplicate_kernel<<<dim3((context_->n >> 8), current_decomp_count,
-    1), 256, 0, stream>>>( temp0_rotation, temp2_rotation,
-    context_->modulus_->data(), context_->n_power, first_rns_mod_count,
-    current_rns_mod_count, current_decomp_count);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
-        int location = 0;
-        for (int i = 0; i < current_level; i++)
+        std::vector<Complex64> coeffs(coefficients.size());
+        for (size_t i = 0; i < coefficients.size(); i++)
         {
-            location += counter;
-            counter--;
+            coeffs[i] = Complex64(coefficients[i], 0.0);
         }
+        int degree = static_cast<int>(coefficients.size()) - 1;
+        Polynomial pol(degree, coeffs, true, type, -1.0, 1.0);
 
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp2_rotation, context_->ntt_table_->data(),
-    context_->modulus_->data(), cfg_ntt, current_decomp_count *
-    current_rns_mod_count, current_rns_mod_count, new_prime_locations +
-    location);
-
-        //
-
-        global_memory_replace_kernel<<<dim3((context_->n >> 8),
-    current_decomp_count, 2), 256, 0, stream>>>( first_cipher.data(),
-    result.data(), context_->n_power); HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        //
-
-        for (int i = 1; i < n1; i++)
+        Ciphertext<Scheme::CKKS> input;
+        copy_to_stream(input1, input, options.stream_);
+        if (target_scale == 0.0)
         {
-            int shift_n1 = bsgs_shift[i];
-            int galoiselt =
-                steps_to_galois_elt(shift_n1, context_->n,
-    galois_key.group_order_); int offset = ((2 * current_decomp_count) <<
-    context_->n_power) * i;
-
-            // MultSum
-            // TODO: make it efficient
-            int iteration_count_1 = current_decomp_count / 4;
-            int iteration_count_2 = current_decomp_count % 4;
-            if (galois_key.storage_type_ == storage_type::DEVICE)
-            {
-                keyswitch_multiply_accumulate_leveled_kernel<<<
-                    dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-    stream>>>( temp2_rotation, galois_key.device_location_[galoiselt].data(),
-                    temp3_rotation, context_->modulus_->data(),
-    first_rns_mod_count, current_decomp_count, iteration_count_1,
-    iteration_count_2, context_->n_power);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-            }
-            else
-            {
-                DeviceVector<Data64> key_location(
-                    galois_key.host_location_[galoiselt], stream);
-                keyswitch_multiply_accumulate_leveled_kernel<<<
-                    dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-    stream>>>( temp2_rotation, key_location.data(), temp3_rotation,
-                    context_->modulus_->data(), first_rns_mod_count,
-    current_decomp_count, iteration_count_1, iteration_count_2,
-    context_->n_power); HEONGPU_CUDA_CHECK(cudaGetLastError());
-            }
-
-            gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                temp3_rotation, context_->intt_table_->data(),
-    context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
-    current_rns_mod_count, new_prime_locations + location);
-
-            // ModDown + Permute
-            divide_round_lastq_permute_ckks_kernel<<<
-                dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-    stream>>>( temp3_rotation, temp0_rotation, result.data() + offset,
-                context_->modulus_->data(), context_->half_p_->data(),
-    context_->half_mod_->data(), context_->last_q_modinv_->data(), galoiselt,
-    context_->n_power, current_rns_mod_count, current_decomp_count,
-                first_rns_mod_count, context_->Q_size, context_->P_size);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            gpuntt::GPU_NTT_Inplace(
-                result.data() + offset, context_->ntt_table_->data(),
-    context_->modulus_->data(), cfg_ntt, 2 * current_decomp_count,
-    current_decomp_count);
+            target_scale = input1.scale_;
         }
-
-        return result;
-    }
-    */
-
-    __host__ DeviceVector<Data64>
-    HEOperator<Scheme::CKKS>::fast_single_hoisting_rotation_ckks_method_II(
-        Ciphertext<Scheme::CKKS>& first_cipher, std::vector<int>& bsgs_shift,
-        int n1, Galoiskey<Scheme::CKKS>& galois_key, const cudaStream_t stream)
-    {
-        int current_level = first_cipher.depth_;
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - current_level;
-        int current_decomp_count = context_->Q_size - current_level;
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size) +
-                (2 * context_->n * context_->d_leveled->operator[](0) *
-                 context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation + (context_->n * context_->Q_size);
-        Data64* temp4_rotation =
-            temp3_rotation +
-            (2 * context_->n * context_->d_leveled->operator[](0) *
-             context_->Q_prime_size);
-
-        DeviceVector<Data64> result((2 * current_decomp_count * n1)
-                                        << context_->n_power,
-                                    stream); // store n1 ciphertext
-
-        // global_memory_replace_kernel<<<dim3((context_->n >> 8),
-        // current_decomp_count, 2),
-        //                                256, 0, stream>>>(
-        //     first_cipher.data(), result.data(), context_->n_power);
-        // HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        for (int i = 0; i < n1; i++)
-        {
-            int offset = ((2 * current_decomp_count) << context_->n_power) * i;
-            if (bsgs_shift[i] == 0)
-            {
-                global_memory_replace_kernel<<<dim3((context_->n >> 8),
-                                                    current_decomp_count, 2),
-                                               256, 0, stream>>>(
-                    first_cipher.data(), result.data() + offset,
-                    context_->n_power);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                continue;
-            }
-
-            int shift_n1 = bsgs_shift[i];
-            int galoiselt = steps_to_galois_elt(shift_n1, context_->n,
-                                                galois_key.group_order_);
-            bool key_exist =
-                (galois_key.storage_type_ == storage_type::DEVICE)
-                    ? (galois_key.device_location_.find(galoiselt) !=
-                       galois_key.device_location_.end())
-                    : (galois_key.host_location_.find(galoiselt) !=
-                       galois_key.host_location_.end());
-            if (key_exist)
-            {
-                int galois_elt = galoiselt;
-
-                gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-                    .n_power = context_->n_power,
-                    .ntt_type = gpuntt::INVERSE,
-                    .ntt_layout = gpuntt::PerPolynomial,
-                    .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                    .zero_padding = false,
-                    .mod_inverse = context_->n_inverse_->data(),
-                    .stream = stream};
-
-                gpuntt::GPU_INTT(
-                    first_cipher.data(), temp0_rotation,
-                    context_->intt_table_->data(), context_->modulus_->data(),
-                    cfg_intt, 2 * current_decomp_count, current_decomp_count);
-
-                gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                    .n_power = context_->n_power,
-                    .ntt_type = gpuntt::FORWARD,
-                    .ntt_layout = gpuntt::PerPolynomial,
-                    .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                    .zero_padding = false,
-                    .stream = stream};
-
-                int counter = first_rns_mod_count;
-                int location = 0;
-                for (int i = 0; i < first_cipher.depth_; i++)
-                {
-                    location += counter;
-                    counter--;
-                }
-
-                base_conversion_DtoQtilde_relin_leveled_kernel<<<
-                    dim3((context_->n >> 8),
-                         context_->d_leveled->operator[](first_cipher.depth_),
-                         1),
-                    256, 0, stream>>>(
-                    temp0_rotation +
-                        (current_decomp_count << context_->n_power),
-                    temp3_rotation, context_->modulus_->data(),
-                    context_->base_change_matrix_D_to_Qtilda_leveled
-                        ->
-                        operator[](first_cipher.depth_)
-                        .data(),
-                    context_->Mi_inv_D_to_Qtilda_leveled
-                        ->
-                        operator[](first_cipher.depth_)
-                        .data(),
-                    context_->prod_D_to_Qtilda_leveled
-                        ->
-                        operator[](first_cipher.depth_)
-                        .data(),
-                    context_->I_j_leveled->operator[](first_cipher.depth_)
-                        .data(),
-                    context_->I_location_leveled->operator[](
-                                                    first_cipher.depth_)
-                        .data(),
-                    context_->n_power,
-                    context_->d_leveled->operator[](first_cipher.depth_),
-                    current_rns_mod_count, current_decomp_count,
-                    first_cipher.depth_,
-                    context_->prime_location_leveled->data() + location);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                    temp3_rotation, context_->ntt_table_->data(),
-                    context_->modulus_->data(), cfg_ntt,
-                    context_->d_leveled->operator[](first_cipher.depth_) *
-                        current_rns_mod_count,
-                    current_rns_mod_count, new_prime_locations + location);
-
-                // MultSum
-                // TODO: make it efficient
-                int iteration_count_1 =
-                    context_->d_leveled->operator[](first_cipher.depth_) / 4;
-                int iteration_count_2 =
-                    context_->d_leveled->operator[](first_cipher.depth_) % 4;
-                if (galois_key.storage_type_ == storage_type::DEVICE)
-                {
-                    keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
-                        dim3((context_->n >> 8), current_rns_mod_count, 1), 256,
-                        0, stream>>>(
-                        temp3_rotation,
-                        galois_key.device_location_[galois_elt].data(),
-                        temp4_rotation, context_->modulus_->data(),
-                        first_rns_mod_count, current_decomp_count,
-                        current_rns_mod_count, iteration_count_1,
-                        iteration_count_2, first_cipher.depth_,
-                        context_->n_power);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-                }
-                else
-                {
-                    DeviceVector<Data64> key_location(
-                        galois_key.host_location_[galois_elt], stream);
-                    keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
-                        dim3((context_->n >> 8), current_rns_mod_count, 1), 256,
-                        0, stream>>>(temp3_rotation, key_location.data(),
-                                     temp4_rotation, context_->modulus_->data(),
-                                     first_rns_mod_count, current_decomp_count,
-                                     current_rns_mod_count, iteration_count_1,
-                                     iteration_count_2, first_cipher.depth_,
-                                     context_->n_power);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-                }
-
-                gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                    temp4_rotation, context_->intt_table_->data(),
-                    context_->modulus_->data(), cfg_intt,
-                    2 * current_rns_mod_count, current_rns_mod_count,
-                    new_prime_locations + location);
-
-                // ModDown + Permute
-                divide_round_lastq_permute_ckks_kernel<<<
-                    dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-                    stream>>>(
-                    temp4_rotation, temp0_rotation, result.data() + offset,
-                    context_->modulus_->data(), context_->half_p_->data(),
-                    context_->half_mod_->data(),
-                    context_->last_q_modinv_->data(), galois_elt,
-                    context_->n_power, current_rns_mod_count,
-                    current_decomp_count, first_rns_mod_count, context_->Q_size,
-                    context_->P_size);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                gpuntt::GPU_NTT_Inplace(
-                    result.data() + offset, context_->ntt_table_->data(),
-                    context_->modulus_->data(), cfg_ntt,
-                    2 * current_decomp_count, current_decomp_count);
-            }
-            else
-            {
-                std::vector<int> indexs = rotation_index_generator(
-                    shift_n1, galois_key.max_log_slot_, galois_key.max_shift_);
-                std::vector<int> required_galoiselt;
-                for (int index : indexs)
-                {
-                    if (!(galois_key.galois_elt.find(index) !=
-                          galois_key.galois_elt.end()))
-                    {
-                        throw std::logic_error("Galois key not present!");
-                    }
-                    required_galoiselt.push_back(galois_key.galois_elt[index]);
-                }
-
-                Data64* in_data = first_cipher.data();
-                for (auto& galois_elt : required_galoiselt)
-                {
-                    gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-                        .n_power = context_->n_power,
-                        .ntt_type = gpuntt::INVERSE,
-                        .ntt_layout = gpuntt::PerPolynomial,
-                        .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                        .zero_padding = false,
-                        .mod_inverse = context_->n_inverse_->data(),
-                        .stream = stream};
-
-                    gpuntt::GPU_INTT(
-                        in_data, temp0_rotation, context_->intt_table_->data(),
-                        context_->modulus_->data(), cfg_intt,
-                        2 * current_decomp_count, current_decomp_count);
-
-                    gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-                        .n_power = context_->n_power,
-                        .ntt_type = gpuntt::FORWARD,
-                        .ntt_layout = gpuntt::PerPolynomial,
-                        .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-                        .zero_padding = false,
-                        .stream = stream};
-
-                    int counter = first_rns_mod_count;
-                    int location = 0;
-                    for (int i = 0; i < first_cipher.depth_; i++)
-                    {
-                        location += counter;
-                        counter--;
-                    }
-
-                    base_conversion_DtoQtilde_relin_leveled_kernel<<<
-                        dim3((context_->n >> 8),
-                             context_->d_leveled->operator[](
-                                 first_cipher.depth_),
-                             1),
-                        256, 0, stream>>>(
-                        temp0_rotation +
-                            (current_decomp_count << context_->n_power),
-                        temp3_rotation, context_->modulus_->data(),
-                        context_->base_change_matrix_D_to_Qtilda_leveled
-                            ->
-                            operator[](first_cipher.depth_)
-                            .data(),
-                        context_->Mi_inv_D_to_Qtilda_leveled
-                            ->
-                            operator[](first_cipher.depth_)
-                            .data(),
-                        context_->prod_D_to_Qtilda_leveled
-                            ->
-                            operator[](first_cipher.depth_)
-                            .data(),
-                        context_->I_j_leveled->operator[](first_cipher.depth_)
-                            .data(),
-                        context_->I_location_leveled
-                            ->
-                            operator[](first_cipher.depth_)
-                            .data(),
-                        context_->n_power,
-                        context_->d_leveled->operator[](first_cipher.depth_),
-                        current_rns_mod_count, current_decomp_count,
-                        first_cipher.depth_,
-                        context_->prime_location_leveled->data() + location);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                        temp3_rotation, context_->ntt_table_->data(),
-                        context_->modulus_->data(), cfg_ntt,
-                        context_->d_leveled->operator[](first_cipher.depth_) *
-                            current_rns_mod_count,
-                        current_rns_mod_count, new_prime_locations + location);
-
-                    // MultSum
-                    // TODO: make it efficient
-                    int iteration_count_1 =
-                        context_->d_leveled->operator[](first_cipher.depth_) /
-                        4;
-                    int iteration_count_2 =
-                        context_->d_leveled->operator[](first_cipher.depth_) %
-                        4;
-                    if (galois_key.storage_type_ == storage_type::DEVICE)
-                    {
-                        keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
-                            dim3((context_->n >> 8), current_rns_mod_count, 1),
-                            256, 0, stream>>>(
-                            temp3_rotation,
-                            galois_key.device_location_[galois_elt].data(),
-                            temp4_rotation, context_->modulus_->data(),
-                            first_rns_mod_count, current_decomp_count,
-                            current_rns_mod_count, iteration_count_1,
-                            iteration_count_2, first_cipher.depth_,
-                            context_->n_power);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-                    }
-                    else
-                    {
-                        DeviceVector<Data64> key_location(
-                            galois_key.host_location_[galois_elt], stream);
-                        keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
-                            dim3((context_->n >> 8), current_rns_mod_count, 1),
-                            256, 0, stream>>>(
-                            temp3_rotation, key_location.data(), temp4_rotation,
-                            context_->modulus_->data(), first_rns_mod_count,
-                            current_decomp_count, current_rns_mod_count,
-                            iteration_count_1, iteration_count_2,
-                            first_cipher.depth_, context_->n_power);
-                        HEONGPU_CUDA_CHECK(cudaGetLastError());
-                    }
-
-                    gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                        temp4_rotation, context_->intt_table_->data(),
-                        context_->modulus_->data(), cfg_intt,
-                        2 * current_rns_mod_count, current_rns_mod_count,
-                        new_prime_locations + location);
-
-                    // ModDown + Permute
-                    divide_round_lastq_permute_ckks_kernel<<<
-                        dim3((context_->n >> 8), current_decomp_count, 2), 256,
-                        0, stream>>>(
-                        temp4_rotation, temp0_rotation, result.data() + offset,
-                        context_->modulus_->data(), context_->half_p_->data(),
-                        context_->half_mod_->data(),
-                        context_->last_q_modinv_->data(), galois_elt,
-                        context_->n_power, current_rns_mod_count,
-                        current_decomp_count, first_rns_mod_count,
-                        context_->Q_size, context_->P_size);
-                    HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-                    gpuntt::GPU_NTT_Inplace(
-                        result.data() + offset, context_->ntt_table_->data(),
-                        context_->modulus_->data(), cfg_ntt,
-                        2 * current_decomp_count, current_decomp_count);
-
-                    in_data = result.data() + offset;
-                }
-            }
-        }
-        return result;
+        return evaluate_poly(input, target_scale, input1.scale_, pol, relin_key,
+                             options);
     }
 
-    // TODO: Fix it!
-    /*
-    __host__ DeviceVector<Data64>
-    HEOperator<Scheme::CKKS>::fast_single_hoisting_rotation_ckks_method_II(
-        Ciphertext<Scheme::CKKS>& first_cipher, std::vector<int>& bsgs_shift,
-        int n1, Galoiskey<Scheme::CKKS>& galois_key, const cudaStream_t stream)
+    __host__ Ciphertext<Scheme::CKKS>
+    HEOperator<Scheme::CKKS>::evaluate_polynomial(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const std::vector<double>& coefficients,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        const ExecutionOptions& options)
     {
-        int current_level = first_cipher.depth_;
-        int first_rns_mod_count = context_->Q_prime_size;
-        int current_rns_mod_count = context_->Q_prime_size - current_level;
-        int current_decomp_count = context_->Q_size - current_level;
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) + (2 * context_->n *
-    context_->Q_size) + (context_->n * context_->Q_size) + (2 * context_->n *
-    context_->d_leveled->operator[](0) * context_->Q_prime_size) + (2 *
-    context_->n * context_->Q_prime_size), stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation = temp0_rotation + (2 * context_->n *
-    context_->Q_size); Data64* temp2_rotation = temp1_rotation + (2 *
-    context_->n * context_->Q_size); Data64* temp3_rotation = temp2_rotation +
-    (context_->n * context_->Q_size); Data64* temp4_rotation = temp3_rotation +
-            (2 * context_->n * context_->d_leveled->operator[](0) *
-    context_->Q_prime_size);
-
-        DeviceVector<Data64> result((2 * current_decomp_count * n1) <<
-    context_->n_power, stream); // store n1 ciphertext
-
-        // decompose and mult P
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_NTT(first_cipher.data(), temp0_rotation,
-                        context_->intt_table_->data(),
-    context_->modulus_->data(), cfg_intt, 2 * current_decomp_count,
-    current_decomp_count);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        int counter = first_rns_mod_count;
-        int location = 0;
-        for (int i = 0; i < current_level; i++)
+        input1.validate_context(context_);
+        Ciphertext<Scheme::CKKS> storage;
+        const Ciphertext<Scheme::CKKS>& input =
+            automatic_input(input1, storage, options);
+        int degree = static_cast<int>(coefficients.size()) - 1;
+        int depth = polynomial_depth(degree);
+        if (input.level() < depth)
         {
-            location += counter;
-            counter--;
+            throw LevelMismatchError(error_message(
+                "A polynomial of degree ", degree, " needs ", depth,
+                " levels, but the ciphertext has ", input.level(), "."));
         }
 
-        base_conversion_DtoQtilde_relin_leveled_kernel<<<
-            dim3((context_->n >> 8),
-    context_->d_leveled->operator[](current_level), 1), 256, 0, stream>>>(
-            temp0_rotation + (current_decomp_count << context_->n_power),
-    temp3_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Qtilda_leveled->operator[](current_level)
-                .data(),
-            context_->Mi_inv_D_to_Qtilda_leveled->operator[](current_level).data(),
-            context_->prod_D_to_Qtilda_leveled->operator[](current_level).data(),
-            context_->I_j_leveled->operator[](current_level).data(),
-            context_->I_location_leveled->operator[](current_level).data(),
-    context_->n_power, context_->d_leveled->operator[](current_level),
-    current_rns_mod_count, current_decomp_count, current_level,
-            context_->prime_location_leveled->data() + location);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-            temp3_rotation, context_->ntt_table_->data(),
-    context_->modulus_->data(), cfg_ntt,
-            context_->d_leveled->operator[](current_level) *
-    current_rns_mod_count, current_rns_mod_count, new_prime_locations +
-    location);
-
-        global_memory_replace_kernel<<<dim3((context_->n >> 8),
-    current_decomp_count, 2), 256, 0, stream>>>( first_cipher.data(),
-    result.data(), context_->n_power); HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        for (int i = 1; i < n1; i++)
-        {
-            int shift_n1 = bsgs_shift[i];
-            int galoiselt =
-                steps_to_galois_elt(shift_n1, context_->n,
-    galois_key.group_order_); int offset = ((2 * current_decomp_count) <<
-    context_->n_power) * i;
-
-            // MultSum
-            // TODO: make it efficient
-            int iteration_count_1 =
-                context_->d_leveled->operator[](first_cipher.depth_) / 4;
-            int iteration_count_2 =
-                context_->d_leveled->operator[](first_cipher.depth_) % 4;
-            if (galois_key.storage_type_ == storage_type::DEVICE)
-            {
-                keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
-                    dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-    stream>>>( temp3_rotation, galois_key.device_location_[galoiselt].data(),
-                    temp4_rotation, context_->modulus_->data(),
-    first_rns_mod_count, current_decomp_count, current_rns_mod_count,
-                    iteration_count_1, iteration_count_2, first_cipher.depth_,
-                    context_->n_power);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-            }
-            else
-            {
-                DeviceVector<Data64> key_location(
-                    galois_key.host_location_[galoiselt], stream);
-                keyswitch_multiply_accumulate_leveled_method_II_kernel<<<
-                    dim3((context_->n >> 8), current_rns_mod_count, 1), 256, 0,
-    stream>>>( temp3_rotation, key_location.data(), temp4_rotation,
-                    context_->modulus_->data(), first_rns_mod_count,
-    current_decomp_count, current_rns_mod_count, iteration_count_1,
-    iteration_count_2, first_cipher.depth_, context_->n_power);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
-            }
-
-            gpuntt::GPU_NTT_Modulus_Ordered_Inplace(
-                temp4_rotation, context_->intt_table_->data(),
-    context_->modulus_->data(), cfg_intt, 2 * current_rns_mod_count,
-    current_rns_mod_count, new_prime_locations + location);
-
-            // ModDown + Permute
-            divide_round_lastq_permute_ckks_kernel<<<
-                dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-    stream>>>( temp4_rotation, temp0_rotation, result.data() + offset,
-                context_->modulus_->data(), context_->half_p_->data(),
-    context_->half_mod_->data(), context_->last_q_modinv_->data(), galoiselt,
-    context_->n_power, current_rns_mod_count, current_decomp_count,
-                first_rns_mod_count, context_->Q_size, context_->P_size);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            gpuntt::GPU_NTT_Inplace(
-                result.data() + offset, context_->ntt_table_->data(),
-    context_->modulus_->data(), cfg_ntt, 2 * current_decomp_count,
-    current_decomp_count);
-        }
-        return result;
+        double target_scale = automatic_target(input, depth);
+        ManualScope manual;
+        return evaluate_in_basis(input, coefficients, PolyType::monomial,
+                                 relin_key, options, target_scale);
     }
-    */
 
-    __host__ HEOperator<Scheme::CKKS>::Vandermonde::Vandermonde(
-        const int poly_degree, const int CtoS_piece, const int StoC_piece,
-        const bool less_key_mode)
+    __host__ Ciphertext<Scheme::CKKS>
+    HEOperator<Scheme::CKKS>::evaluate_chebyshev(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const std::vector<double>& coefficients, double a, double b,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        const ExecutionOptions& options)
     {
-        poly_degree_ = poly_degree;
-        num_slots_ = poly_degree_ >> 1;
-        log_num_slots_ = int(log2l(num_slots_));
+        input1.validate_context(context_);
+        Ciphertext<Scheme::CKKS> storage;
+        const Ciphertext<Scheme::CKKS>& input =
+            automatic_input(input1, storage, options);
+        if (!(a < b))
+        {
+            throw ParameterError(
+                error_message("The interval [", a, ", ", b, "] is empty."));
+        }
+        int degree = static_cast<int>(coefficients.size()) - 1;
+        int depth = polynomial_depth(degree, true, a, b);
+        if (input.level() < depth)
+        {
+            throw LevelMismatchError(error_message(
+                "A Chebyshev series of degree ", degree, " on [", a, ", ", b,
+                "] needs ", depth, " levels, but the ciphertext has ",
+                input.level(), "."));
+        }
 
-        CtoS_piece_ = CtoS_piece;
-        StoC_piece_ = StoC_piece;
+        double target_scale = automatic_target(input, depth);
+        ManualScope manual;
+        if (a == -1.0 && b == 1.0)
+        {
+            return evaluate_in_basis(input, coefficients, PolyType::chebyshev,
+                                     relin_key, options, target_scale);
+        }
 
-        CtoS_Scaling_ = 1.0;
-        StoC_Scaling_ = 1.0;
+        // Maps [a, b] to [-1, 1]. The constant is encoded with the scale of
+        // the prime that rescale divides by, so the scale stays the same.
+        Ciphertext<Scheme::CKKS> mapped(context_, options);
+        double prime =
+            static_cast<double>(context_->prime_vector_[input.level()].value);
+        multiply_plain(input, 2.0 / (b - a), mapped, prime, options);
+        rescale_inplace(mapped, options);
+        mapped.scale_ = input.scale_;
+        add_plain_inplace(mapped, -(a + b) / (b - a), options);
 
-        generate_E_diagonals_index();
-        generate_E_inv_diagonals_index();
-        split_E();
-        split_E_inv();
+        return evaluate_in_basis(mapped, coefficients, PolyType::chebyshev,
+                                 relin_key, options, target_scale);
+    }
 
-        generate_E_diagonals();
-        generate_E_inv_diagonals();
-
-        generate_V_n_lists();
-
-        generate_pre_comp_V();
-        generate_pre_comp_V_inv();
-
-        generate_key_indexs(less_key_mode);
-        key_indexs_ = unique_sort(key_indexs_);
+    __host__ Ciphertext<Scheme::CKKS>
+    HEOperator<Scheme::CKKS>::evaluate_chebyshev(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const std::function<double(double)>& function, double a, double b,
+        int degree, const Relinkey<Scheme::CKKS>& relin_key,
+        const ExecutionOptions& options)
+    {
+        if (degree < 1 || !(a < b))
+        {
+            throw ParameterError(error_message(
+                "Chebyshev interpolation needs a degree of at least 1 and a "
+                "non-empty interval, got degree ",
+                degree, " on [", a, ", ", b, "]."));
+        }
+        return evaluate_chebyshev(
+            input1, chebyshev_coefficients(function, a, b, degree), a, b,
+            relin_key, options);
     }
 
     __host__ HEOperator<Scheme::CKKS>::Vandermonde::Vandermonde(
@@ -5672,12 +4203,12 @@ namespace heongpu
         generate_E_diagonals();
         generate_E_inv_diagonals();
 
-        generate_V_n_lists_v2(CtoS_bsgs_ratio, StoC_bsgs_ratio);
+        generate_V_n_lists(CtoS_bsgs_ratio, StoC_bsgs_ratio);
 
-        generate_pre_comp_V_v2();
-        generate_pre_comp_V_inv_v2();
+        generate_pre_comp_V();
+        generate_pre_comp_V_inv();
 
-        generate_key_indexs_v2();
+        generate_key_indexs();
         key_indexs_ = unique_sort(key_indexs_);
     }
 
@@ -6199,127 +4730,17 @@ namespace heongpu
         }
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::Vandermonde::generate_V_n_lists()
-    {
-        for (int i = 0; i < StoC_piece_; i++)
-        {
-            std::vector<std::vector<int>> result =
-                heongpu::seperate_func(V_matrixs_index_[i]);
-
-            int sizex = result.size();
-            int sizex_2 = (sizex >> 1);
-
-            std::vector<std::vector<int>> real_shift_n2;
-            for (size_t l1 = 0; l1 < sizex_2; l1++)
-            {
-                std::vector<int> temp = {result[l1][0]};
-                real_shift_n2.push_back(std::move(temp));
-            }
-
-            for (size_t l1 = sizex_2; l1 < sizex; l1++)
-            {
-                std::vector<int> temp;
-                int fisrt_ = result[sizex_2][0];
-                int second_ = result[l1][0] - result[sizex_2][0];
-
-                if (second_ == 0)
-                {
-                    temp.push_back(fisrt_);
-                }
-                else
-                {
-                    temp.push_back(fisrt_);
-                    temp.push_back(second_);
-                }
-
-                real_shift_n2.push_back(std::move(temp));
-            }
-
-            diags_matrices_bsgs_.push_back(std::move(result));
-            real_shift_n2_bsgs_.push_back(std::move(real_shift_n2));
-        }
-
-        for (int i = 0; i < CtoS_piece_; i++)
-        {
-            std::vector<std::vector<int>> result =
-                heongpu::seperate_func(V_inv_matrixs_index_[i]);
-
-            int sizex = result.size();
-            int sizex_2 = (sizex >> 1);
-
-            std::vector<std::vector<int>> real_shift_n2;
-            for (size_t l1 = 0; l1 < sizex_2; l1++)
-            {
-                std::vector<int> temp = {result[l1][0]};
-                real_shift_n2.push_back(std::move(temp));
-            }
-
-            for (size_t l1 = sizex_2; l1 < sizex; l1++)
-            {
-                std::vector<int> temp;
-                int fisrt_ = result[sizex_2][0];
-                int second_ = result[l1][0] - result[sizex_2][0];
-
-                if (second_ == 0)
-                {
-                    temp.push_back(fisrt_);
-                }
-                else
-                {
-                    temp.push_back(fisrt_);
-                    temp.push_back(second_);
-                }
-
-                real_shift_n2.push_back(std::move(temp));
-            }
-
-            diags_matrices_inv_bsgs_.push_back(std::move(result));
-            real_shift_n2_inv_bsgs_.push_back(std::move(real_shift_n2));
-        }
-    }
-
-    __host__ void HEOperator<Scheme::CKKS>::Vandermonde::generate_V_n_lists_v2(
+    __host__ void HEOperator<Scheme::CKKS>::Vandermonde::generate_V_n_lists(
         float CtoS_bsgs_ratio, float StoC_bsgs_ratio)
     {
         for (int i = 0; i < StoC_piece_; i++)
         {
             std::vector<int> rot_n1, rot_n2;
             std::vector<std::vector<int>> result =
-                heongpu::seperate_func_v2(V_matrixs_index_[i], num_slots_,
-                                          rot_n1, rot_n2, StoC_bsgs_ratio);
-
-            int sizex = result.size();
-            int sizex_2 = (sizex >> 1);
-
-            std::vector<std::vector<int>> real_shift_n2;
-            for (size_t l1 = 0; l1 < sizex_2; l1++)
-            {
-                std::vector<int> temp = {result[l1][0]};
-                real_shift_n2.push_back(std::move(temp));
-            }
-
-            for (size_t l1 = sizex_2; l1 < sizex; l1++)
-            {
-                std::vector<int> temp;
-                int fisrt_ = result[sizex_2][0];
-                int second_ = result[l1][0] - result[sizex_2][0];
-
-                if (second_ == 0)
-                {
-                    temp.push_back(fisrt_);
-                }
-                else
-                {
-                    temp.push_back(fisrt_);
-                    temp.push_back(second_);
-                }
-
-                real_shift_n2.push_back(std::move(temp));
-            }
+                heongpu::seperate_func(V_matrixs_index_[i], num_slots_, rot_n1,
+                                       rot_n2, StoC_bsgs_ratio);
 
             diags_matrices_bsgs_.push_back(std::move(result));
-            real_shift_n2_bsgs_.push_back(std::move(real_shift_n2));
-
             diags_matrices_bsgs_rot_n1_.push_back(std::move(rot_n1));
             diags_matrices_bsgs_rot_n2_.push_back(std::move(rot_n2));
         }
@@ -6328,111 +4749,16 @@ namespace heongpu
         {
             std::vector<int> rot_n1, rot_n2;
             std::vector<std::vector<int>> result =
-                heongpu::seperate_func_v2(V_inv_matrixs_index_[i], num_slots_,
-                                          rot_n1, rot_n2, CtoS_bsgs_ratio);
-
-            int sizex = result.size();
-            int sizex_2 = (sizex >> 1);
-
-            std::vector<std::vector<int>> real_shift_n2;
-            for (size_t l1 = 0; l1 < sizex_2; l1++)
-            {
-                std::vector<int> temp = {result[l1][0]};
-                real_shift_n2.push_back(std::move(temp));
-            }
-
-            for (size_t l1 = sizex_2; l1 < sizex; l1++)
-            {
-                std::vector<int> temp;
-                int fisrt_ = result[sizex_2][0];
-                int second_ = result[l1][0] - result[sizex_2][0];
-
-                if (second_ == 0)
-                {
-                    temp.push_back(fisrt_);
-                }
-                else
-                {
-                    temp.push_back(fisrt_);
-                    temp.push_back(second_);
-                }
-
-                real_shift_n2.push_back(std::move(temp));
-            }
+                heongpu::seperate_func(V_inv_matrixs_index_[i], num_slots_,
+                                       rot_n1, rot_n2, CtoS_bsgs_ratio);
 
             diags_matrices_inv_bsgs_.push_back(std::move(result));
-            real_shift_n2_inv_bsgs_.push_back(std::move(real_shift_n2));
-
             diags_matrices_inv_bsgs_rot_n1_.push_back(std::move(rot_n1));
             diags_matrices_inv_bsgs_rot_n2_.push_back(std::move(rot_n2));
         }
     }
 
     __host__ void HEOperator<Scheme::CKKS>::Vandermonde::generate_pre_comp_V()
-    {
-        int bloksize = (num_slots_ <= 1024) ? num_slots_ : 1024;
-        int blokcount = (num_slots_ + (1023)) / 1024;
-
-        for (int m = 0; m < StoC_piece_; m++)
-        {
-            heongpu::DeviceVector<Complex64> temp_rotated(
-                (V_matrixs_index_[m].size()) << log_num_slots_);
-
-            int counter = 0;
-            for (int j = 0; j < diags_matrices_bsgs_[m].size(); j++)
-            {
-                int real_shift = -(diags_matrices_bsgs_[m][j][0]);
-                for (int i = 0; i < diags_matrices_bsgs_[m][j].size(); i++)
-                {
-                    int location = (counter << log_num_slots_);
-
-                    vector_rotate_kernel<<<blokcount, bloksize>>>(
-                        V_matrixs_[m].data() + location,
-                        temp_rotated.data() + location, real_shift,
-                        log_num_slots_);
-
-                    counter++;
-                }
-            }
-
-            V_matrixs_rotated_.push_back(std::move(temp_rotated));
-        }
-    }
-
-    __host__ void
-    HEOperator<Scheme::CKKS>::Vandermonde::generate_pre_comp_V_inv()
-    {
-        int bloksize = (num_slots_ <= 1024) ? num_slots_ : 1024;
-        int blokcount = (num_slots_ + (1023)) / 1024;
-
-        for (int m = 0; m < CtoS_piece_; m++)
-        {
-            heongpu::DeviceVector<Complex64> temp_rotated(
-                (V_inv_matrixs_index_[m].size()) << log_num_slots_);
-
-            int counter = 0;
-            for (int j = 0; j < diags_matrices_inv_bsgs_[m].size(); j++)
-            {
-                int real_shift = -(diags_matrices_inv_bsgs_[m][j][0]);
-                for (int i = 0; i < diags_matrices_inv_bsgs_[m][j].size(); i++)
-                {
-                    int location = (counter << log_num_slots_);
-
-                    vector_rotate_kernel<<<blokcount, bloksize>>>(
-                        V_inv_matrixs_[m].data() + location,
-                        temp_rotated.data() + location, real_shift,
-                        log_num_slots_);
-
-                    counter++;
-                }
-            }
-
-            V_inv_matrixs_rotated_.push_back(std::move(temp_rotated));
-        }
-    }
-
-    __host__ void
-    HEOperator<Scheme::CKKS>::Vandermonde::generate_pre_comp_V_v2()
     {
         int bloksize = (num_slots_ <= 1024) ? num_slots_ : 1024;
         int blokcount = (num_slots_ + (1023)) / 1024;
@@ -6464,7 +4790,7 @@ namespace heongpu
     }
 
     __host__ void
-    HEOperator<Scheme::CKKS>::Vandermonde::generate_pre_comp_V_inv_v2()
+    HEOperator<Scheme::CKKS>::Vandermonde::generate_pre_comp_V_inv()
     {
         int bloksize = (num_slots_ <= 1024) ? num_slots_ : 1024;
         int blokcount = (num_slots_ + (1023)) / 1024;
@@ -6495,61 +4821,7 @@ namespace heongpu
         }
     }
 
-    __host__ void HEOperator<Scheme::CKKS>::Vandermonde::generate_key_indexs(
-        const bool less_key_mode)
-    {
-        if (less_key_mode)
-        {
-            for (int m = 0; m < CtoS_piece_; m++)
-            {
-                key_indexs_.insert(key_indexs_.end(),
-                                   diags_matrices_inv_bsgs_[m][0].begin(),
-                                   diags_matrices_inv_bsgs_[m][0].end());
-                for (int j = 0; j < diags_matrices_inv_bsgs_[m].size(); j++)
-                {
-                    key_indexs_.push_back(real_shift_n2_inv_bsgs_[m][j][0]);
-                }
-            }
-
-            for (int m = 0; m < StoC_piece_; m++)
-            {
-                key_indexs_.insert(key_indexs_.end(),
-                                   diags_matrices_bsgs_[m][0].begin(),
-                                   diags_matrices_bsgs_[m][0].end());
-                for (int j = 0; j < diags_matrices_bsgs_[m].size(); j++)
-                {
-                    key_indexs_.push_back(real_shift_n2_bsgs_[m][j][0]);
-                }
-            }
-        }
-        else
-        {
-            for (int m = 0; m < CtoS_piece_; m++)
-            {
-                key_indexs_.insert(key_indexs_.end(),
-                                   diags_matrices_inv_bsgs_[m][0].begin(),
-                                   diags_matrices_inv_bsgs_[m][0].end());
-                for (int j = 0; j < diags_matrices_inv_bsgs_[m].size(); j++)
-                {
-                    key_indexs_.push_back(diags_matrices_inv_bsgs_[m][j][0]);
-                }
-            }
-
-            for (int m = 0; m < StoC_piece_; m++)
-            {
-                key_indexs_.insert(key_indexs_.end(),
-                                   diags_matrices_bsgs_[m][0].begin(),
-                                   diags_matrices_bsgs_[m][0].end());
-                for (int j = 0; j < diags_matrices_bsgs_[m].size(); j++)
-                {
-                    key_indexs_.push_back(diags_matrices_bsgs_[m][j][0]);
-                }
-            }
-        }
-    }
-
-    __host__ void
-    HEOperator<Scheme::CKKS>::Vandermonde::generate_key_indexs_v2()
+    __host__ void HEOperator<Scheme::CKKS>::Vandermonde::generate_key_indexs()
     {
         for (int m = 0; m < CtoS_piece_; m++)
         {
@@ -6621,7 +4893,7 @@ namespace heongpu
         double a, b;
         std::vector<Complex64> coeffs;
 
-        if (config.sine_type_ == SineType::COS1)
+        if (config.sine_type_ == SineType::cos1)
         {
             a = -static_cast<double>(config.K_) /
                 std::pow(2.0, config.double_angle_);
@@ -6676,7 +4948,7 @@ namespace heongpu
         int q_size = degree() - split + 1;
         std::vector<Complex64> coeffs_q(q_size, coeffs_[split]);
 
-        if (type_ == PolyType::MONOMIAL)
+        if (type_ == PolyType::monomial)
         {
             // For monomial type: simply copy coeffs[split+1:] as-is
             for (int i = split + 1; i <= degree(); i++)
@@ -6684,7 +4956,7 @@ namespace heongpu
                 coeffs_q[i - split] = coeffs_[i];
             }
         }
-        else if (type_ == PolyType::CHEBYSHEV)
+        else if (type_ == PolyType::chebyshev)
         {
             // For Chebyshev type: apply the transformation
             int i = split + 1;
@@ -6710,16 +4982,12 @@ namespace heongpu
     {
     }
 
-    __host__ void HEArithmeticOperator<Scheme::CKKS>::
-        generate_encoding_transform_context(
-            CKKSEncodingTransformContext& transform_context,
-            const double scale, const CKKSEncodingTransformConfig& config)
+    __host__ void
+    HEArithmeticOperator<Scheme::CKKS>::generate_encoding_transform_context(
+        CKKSEncodingTransformContext& transform_context,
+        const CKKSEncodingTransformConfig& config)
     {
-        if (scale == 0.0)
-        {
-            throw std::invalid_argument(
-                "Scale can not be zero for CKKS encoding transform context.");
-        }
+        require_manual("generate_encoding_transform_context");
 
         if (config.CtoS_piece_ < 2 || config.CtoS_piece_ > 5)
         {
@@ -6731,17 +4999,14 @@ namespace heongpu
             throw std::out_of_range("StoC_piece must be in range [2, 5]");
         }
 
-        transform_context.scale_boot_ = scale;
         transform_context.CtoS_piece_ = config.CtoS_piece_;
         transform_context.StoC_piece_ = config.StoC_piece_;
-        transform_context.less_key_mode_ = config.less_key_mode_;
 
         int ctos_level =
             (config.CtoS_start_level_ < 0) ? 0 : config.CtoS_start_level_;
-        int stoc_level =
-            (config.StoC_start_level_ < 0)
-                ? (ctos_level + transform_context.CtoS_piece_ + 1)
-                : config.StoC_start_level_;
+        int stoc_level = (config.StoC_start_level_ < 0)
+                             ? (ctos_level + transform_context.CtoS_piece_)
+                             : config.StoC_start_level_;
 
         if (ctos_level < 0 || ctos_level >= context_->Q_size)
         {
@@ -6755,23 +5020,13 @@ namespace heongpu
                 "StoC_start_level must be in range [0, Q_size - 1]");
         }
 
-        int ctos_rns_count = context_->Q_size - ctos_level;
-        int stoc_matrix_level = stoc_level + 1;
-        if (stoc_matrix_level >= context_->Q_size)
-        {
-            throw std::out_of_range(
-                "StoC_start_level is too deep: slot_to_coeff needs one extra "
-                "level internally before matrix multiplication.");
-        }
-        int stoc_rns_count = context_->Q_size - stoc_matrix_level;
-
-        if (ctos_rns_count < transform_context.CtoS_piece_)
+        if ((context_->Q_size - ctos_level) <= transform_context.CtoS_piece_)
         {
             throw std::out_of_range(
                 "CtoS_start_level is too deep for selected CtoS_piece.");
         }
 
-        if (stoc_rns_count < transform_context.StoC_piece_)
+        if ((context_->Q_size - stoc_level) <= transform_context.StoC_piece_)
         {
             throw std::out_of_range(
                 "StoC_start_level is too deep for selected StoC_piece.");
@@ -6780,48 +5035,37 @@ namespace heongpu
         transform_context.CtoS_level_ = ctos_level;
         transform_context.StoC_level_ = stoc_level;
 
+        EncodingMatrixConfig cts_config(LinearTransformType::coeffs_to_slots,
+                                        context_->Q_size - 1 - ctos_level);
+        EncodingMatrixConfig stc_config(LinearTransformType::slots_to_coeffs,
+                                        context_->Q_size - 1 - stoc_level);
+
+        // CtoS output is (c + conj(c)), so its 1/2 is folded into the matrix.
         Vandermonde matrix_gen(context_->n, transform_context.CtoS_piece_,
-                               transform_context.StoC_piece_,
-                               transform_context.less_key_mode_);
+                               transform_context.StoC_piece_, 0.5, 1.0,
+                               cts_config.bsgs_ratio_, stc_config.bsgs_ratio_);
 
         transform_context.V_matrixs_rotated_encoded_ =
-            encode_V_matrixs(matrix_gen, transform_context.scale_boot_,
-                             stoc_rns_count);
+            encode_V_matrixs(matrix_gen, stc_config.level_start_);
         transform_context.V_inv_matrixs_rotated_encoded_ =
-            encode_V_inv_matrixs(matrix_gen, transform_context.scale_boot_,
-                                 ctos_rns_count);
+            encode_V_inv_matrixs(matrix_gen, cts_config.level_start_);
 
-        transform_context.diags_matrices_bsgs_ = matrix_gen.diags_matrices_bsgs_;
+        transform_context.diags_matrices_bsgs_ =
+            matrix_gen.diags_matrices_bsgs_;
         transform_context.diags_matrices_inv_bsgs_ =
             matrix_gen.diags_matrices_inv_bsgs_;
 
-        transform_context.real_shift_n2_bsgs_.clear();
-        transform_context.real_shift_n2_inv_bsgs_.clear();
-        if (transform_context.less_key_mode_)
-        {
-            transform_context.real_shift_n2_bsgs_ = matrix_gen.real_shift_n2_bsgs_;
-            transform_context.real_shift_n2_inv_bsgs_ =
-                matrix_gen.real_shift_n2_inv_bsgs_;
-        }
+        transform_context.diags_matrices_bsgs_rot_n1_ =
+            matrix_gen.diags_matrices_bsgs_rot_n1_;
+        transform_context.diags_matrices_inv_bsgs_rot_n1_ =
+            matrix_gen.diags_matrices_inv_bsgs_rot_n1_;
+
+        transform_context.diags_matrices_bsgs_rot_n2_ =
+            matrix_gen.diags_matrices_bsgs_rot_n2_;
+        transform_context.diags_matrices_inv_bsgs_rot_n2_ =
+            matrix_gen.diags_matrices_inv_bsgs_rot_n2_;
 
         transform_context.key_indexs_ = matrix_gen.key_indexs_;
-
-        Complex64 complex_minus_iover2(0.0, -0.5);
-        transform_context.encoded_complex_minus_iover2_ =
-            DeviceVector<Data64>(context_->Q_size << context_->n_power);
-        quick_ckks_encoder_constant_complex(
-            complex_minus_iover2,
-            transform_context.encoded_complex_minus_iover2_.data(),
-            transform_context.scale_boot_);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        Complex64 complex_i(0.0, 1.0);
-        transform_context.encoded_complex_i_ =
-            DeviceVector<Data64>(context_->Q_size << context_->n_power);
-        quick_ckks_encoder_constant_complex(
-            complex_i, transform_context.encoded_complex_i_.data(),
-            transform_context.scale_boot_);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
 
         transform_context.generated_ = true;
     }
@@ -6831,108 +5075,10 @@ namespace heongpu
         const double scale, const BootstrappingConfig& config,
         const arithmetic_bootstrapping_type& boot_type)
     {
-        if (!boot_context_generated_)
-        {
-            scale_boot_ = scale;
-            CtoS_piece_ = config.CtoS_piece_;
-            StoC_piece_ = config.StoC_piece_;
-            taylor_number_ = config.taylor_number_;
-            less_key_mode_ = config.less_key_mode_;
+        check_bootstrapping_output(
+            bootstrapping_levels(config, boot_type).output_level, scale);
+        ManualScope manual;
 
-            switch (static_cast<int>(boot_type))
-            {
-                case 1: // REGULAR_BOOTSTRAPPING
-                    CtoS_level_ = context_->Q_size;
-                    StoC_level_ =
-                        CtoS_level_ - CtoS_piece_ - taylor_number_ - 8;
-                    break;
-                case 2: // SLIM_BOOTSTRAPPING
-                    StoC_level_ = 1 + StoC_piece_;
-                    CtoS_level_ = context_->Q_size;
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Bootstrapping Type");
-                    break;
-            }
-
-            Vandermonde matrix_gen(context_->n, CtoS_piece_, StoC_piece_,
-                                   less_key_mode_);
-
-            V_matrixs_rotated_encoded_ =
-                encode_V_matrixs(matrix_gen, scale_boot_, StoC_level_);
-            V_inv_matrixs_rotated_encoded_ =
-                encode_V_inv_matrixs(matrix_gen, scale_boot_, CtoS_level_);
-
-            V_matrixs_index_ = matrix_gen.V_matrixs_index_;
-            V_inv_matrixs_index_ = matrix_gen.V_inv_matrixs_index_;
-
-            diags_matrices_bsgs_ = matrix_gen.diags_matrices_bsgs_;
-            diags_matrices_inv_bsgs_ = matrix_gen.diags_matrices_inv_bsgs_;
-
-            if (less_key_mode_)
-            {
-                real_shift_n2_bsgs_ = matrix_gen.real_shift_n2_bsgs_;
-                real_shift_n2_inv_bsgs_ = matrix_gen.real_shift_n2_inv_bsgs_;
-            }
-
-            key_indexs_ = matrix_gen.key_indexs_;
-
-            // Pre-computed encoded parameters
-            // CtoS
-            Complex64 complex_minus_iover2(0.0, -0.5);
-            encoded_complex_minus_iover2_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_minus_iover2, encoded_complex_minus_iover2_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            // StoC
-            Complex64 complex_i(0, 1);
-            encoded_complex_i_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_i, encoded_complex_i_.data(), scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            // Scale part
-            Complex64 complex_minus_iscale(
-                0.0, -(((static_cast<double>(context_->prime_vector_[0].value) *
-                         0.25) /
-                        (scale_boot_ * M_PI))));
-            encoded_complex_minus_iscale_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_minus_iscale, encoded_complex_minus_iscale_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            // Exponentiate
-            Complex64 complex_iscaleoverr(
-                0.0, (((2 * M_PI * scale_boot_) /
-                       static_cast<double>(context_->prime_vector_[0].value))) /
-                         static_cast<double>(1 << taylor_number_));
-            encoded_complex_iscaleoverr_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_iscaleoverr, encoded_complex_iscaleoverr_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-            boot_context_generated_ = true;
-        }
-        else
-        {
-            throw std::runtime_error("Bootstrapping parameters is locked after "
-                                     "generation and cannot be modified.");
-        }
-
-        cudaDeviceSynchronize();
-    }
-
-    __host__ void
-    HEArithmeticOperator<Scheme::CKKS>::generate_bootstrapping_params_v2(
-        const double scale, const BootstrappingConfigV2& config)
-    {
         if (!boot_context_generated_)
         {
             scale_boot_ = scale;
@@ -6963,10 +5109,6 @@ namespace heongpu
                 static_cast<double>(eval_mod_config_.Q_) /
                 std::pow(2.0, std::round(std::log2(
                                   static_cast<double>(eval_mod_config_.Q_))));
-            eval_mod_config_.sqrt2pi_ =
-                std::pow(eval_mod_config_.q_diff_ / (2.0 * M_PI),
-                         1.0 / std::pow(2.0, eval_mod_config_.double_angle_));
-
             // double CtoS_Scaling = 1.0
             // /(double(eval_mod_config_.K_)*double(context_->n)*eval_mod_config_.q_diff_);
             double CtoS_Scaling =
@@ -6975,14 +5117,34 @@ namespace heongpu
                 scale_boot_ / (eval_mod_config_.scaling_factor_ /
                                eval_mod_config_.message_ratio_);
 
+            // Slim runs SlotToCoeff first, so the output scaling is folded
+            // into the EvalMod amplitude instead of the StoC matrix.
+            double eval_mod_amplitude = eval_mod_config_.q_diff_ / (2.0 * M_PI);
+            switch (static_cast<int>(boot_type))
+            {
+                case 1: // arithmetic_bootstrapping_type::regular
+                    break;
+                case 2: // arithmetic_bootstrapping_type::slim
+                    eval_mod_amplitude *= StoC_Scaling;
+                    StoC_Scaling = 1.0;
+                    break;
+                default:
+                    throw std::invalid_argument("Invalid Bootstrapping Type");
+                    break;
+            }
+
+            eval_mod_config_.sqrt2pi_ =
+                std::pow(eval_mod_amplitude,
+                         1.0 / std::pow(2.0, eval_mod_config_.double_angle_));
+
             Vandermonde matrix_gen(
                 context_->n, CtoS_piece_, StoC_piece_, CtoS_Scaling,
                 StoC_Scaling, cts_config_.bsgs_ratio_, stc_config_.bsgs_ratio_);
 
             V_matrixs_rotated_encoded_ =
-                encode_V_matrixs_v2(matrix_gen, stc_config_.level_start_);
+                encode_V_matrixs(matrix_gen, stc_config_.level_start_);
             V_inv_matrixs_rotated_encoded_ =
-                encode_V_inv_matrixs_v2(matrix_gen, cts_config_.level_start_);
+                encode_V_inv_matrixs(matrix_gen, cts_config_.level_start_);
 
             V_matrixs_index_ = matrix_gen.V_matrixs_index_;
             V_inv_matrixs_index_ = matrix_gen.V_inv_matrixs_index_;
@@ -7005,7 +5167,7 @@ namespace heongpu
             sine_poly_ = generate_eval_mod_poly(eval_mod_config_,
                                                 eval_mod_config_.sine_deg_);
 
-            if (eval_mod_config_.sine_type_ == SineType::COS1)
+            if (eval_mod_config_.sine_type_ == SineType::cos1)
             {
                 for (int i = 0; i < sine_poly_.coeffs_.size(); i++)
                 {
@@ -7026,133 +5188,6 @@ namespace heongpu
         cudaDeviceSynchronize();
     }
 
-    __host__ Ciphertext<Scheme::CKKS>
-    HEArithmeticOperator<Scheme::CKKS>::regular_bootstrapping(
-        Ciphertext<Scheme::CKKS>& input1, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        if (!boot_context_generated_)
-        {
-            throw std::invalid_argument(
-                "Bootstrapping operation can not be performed before "
-                "generating Bootstrapping parameters!");
-        }
-
-        // Raise modulus
-        int current_decomp_count = context_->Q_size - input1.depth_;
-        if (current_decomp_count != 1)
-        {
-            throw std::logic_error("Ciphertexts leveled should be at max!");
-        }
-
-        ExecutionOptions options_inner =
-            ExecutionOptions()
-                .set_stream(options.stream_)
-                .set_storage_type(storage_type::DEVICE)
-                .set_initial_location(true);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = options.stream_};
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = options.stream_};
-
-        DeviceVector<Data64> input_intt_poly(2 * context_->n, options.stream_);
-        input_storage_manager(
-            input1,
-            [&](Ciphertext<Scheme::CKKS>& input1_)
-            {
-                gpuntt::GPU_INTT(input1.data(), input_intt_poly.data(),
-                                 context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt, 2, 1);
-            },
-            options, false);
-
-        Ciphertext<Scheme::CKKS> c_raised =
-            operator_ciphertext(scale_boot_, options_inner.stream_);
-        mod_raise_kernel<<<dim3((context_->n >> 8), context_->Q_size, 2), 256,
-                           0, options_inner.stream_>>>(
-            input_intt_poly.data(), c_raised.data(), context_->modulus_->data(),
-            context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(c_raised.data(), context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * context_->Q_size, context_->Q_size);
-        c_raised.encoding_ = encoding::COEFFICIENT;
-
-        // Coeff to slot
-        std::vector<heongpu::Ciphertext<Scheme::CKKS>> enc_results =
-            coeff_to_slot(c_raised, galois_key, options_inner); // c_raised
-
-        // Exponentiate
-        Ciphertext<Scheme::CKKS> ciph_neg_exp0 =
-            operator_ciphertext(0, options_inner.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp0 =
-            exp_scaled(enc_results[0], relin_key, options_inner);
-
-        Ciphertext<Scheme::CKKS> ciph_neg_exp1 =
-            operator_ciphertext(0, options_inner.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp1 =
-            exp_scaled(enc_results[1], relin_key, options_inner);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin0 =
-            operator_ciphertext(0, options_inner.stream_);
-        conjugate(ciph_exp0, ciph_neg_exp0, galois_key,
-                  options_inner); // conjugate
-        sub(ciph_exp0, ciph_neg_exp0, ciph_sin0, options_inner);
-
-        Ciphertext<Scheme::CKKS> ciph_sin1 =
-            operator_ciphertext(0, options_inner.stream_);
-        conjugate(ciph_exp1, ciph_neg_exp1, galois_key,
-                  options_inner); // conjugate
-        sub(ciph_exp1, ciph_neg_exp1, ciph_sin1, options_inner);
-
-        // Scale
-        current_decomp_count = context_->Q_size - ciph_sin0.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options_inner.stream_>>>(
-            ciph_sin0.data(), encoded_complex_minus_iscale_.data(),
-            ciph_sin0.data(), context_->modulus_->data(), context_->n_power);
-        ciph_sin0.scale_ = ciph_sin0.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin0.rescale_required_ = true;
-        rescale_inplace(ciph_sin0, options_inner);
-
-        current_decomp_count = context_->Q_size - ciph_sin1.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options_inner.stream_>>>(
-            ciph_sin1.data(), encoded_complex_minus_iscale_.data(),
-            ciph_sin1.data(), context_->modulus_->data(), context_->n_power);
-        ciph_sin1.scale_ = ciph_sin1.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin1.rescale_required_ = true;
-        rescale_inplace(ciph_sin1, options_inner);
-
-        // Slot to coeff
-        Ciphertext<Scheme::CKKS> StoC_results =
-            slot_to_coeff(ciph_sin0, ciph_sin1, galois_key, options_inner);
-        StoC_results.scale_ = scale_boot_;
-        // Bootstrapping API returns a regular CKKS slot ciphertext.
-        StoC_results.encoding_ = encoding::SLOT;
-
-        return StoC_results;
-    }
-
     /**
      * @brief Regular bootstrapping procedure based on the algorithm from
      *        "Efficient Bootstrapping for Approximate Homomorphic Encryption
@@ -7171,14 +5206,43 @@ namespace heongpu
      * @return Bootstrapped ciphertext with refreshed noise and full modulus
      * chain
      */
+    __host__ void
+    HEArithmeticOperator<Scheme::CKKS>::generate_bootstrapping_params(
+        const CKKSBootstrappingPreset& preset)
+    {
+        if (preset.arithmetic_type == arithmetic_bootstrapping_type::none)
+        {
+            throw ParameterError(
+                "The preset is not a regular or slim bootstrapping preset!");
+        }
+        generate_bootstrapping_params(preset.scale, preset.config,
+                                      preset.arithmetic_type);
+    }
+
     __host__ Ciphertext<Scheme::CKKS>
-    HEArithmeticOperator<Scheme::CKKS>::regular_bootstrapping_v2(
-        Ciphertext<Scheme::CKKS>& input1, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key,
+    HEArithmeticOperator<Scheme::CKKS>::regular_bootstrapping_ckks(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const Relinkey<Scheme::CKKS>& relin_key,
         Switchkey<Scheme::CKKS>* swk_dense_to_sparse,
         Switchkey<Scheme::CKKS>* swk_sparse_to_dense,
         const ExecutionOptions& options)
     {
+        // The bootstrapping plans its own levels and scales, from its input
+        // rescaled if it needs it.
+        if (automatic())
+        {
+            Ciphertext<Scheme::CKKS> storage;
+            const Ciphertext<Scheme::CKKS>& first =
+                rescaled(input1, storage, options);
+            ManualScope manual;
+            return regular_bootstrapping_ckks(first, galois_key, relin_key,
+                                              swk_dense_to_sparse,
+                                              swk_sparse_to_dense, options);
+        }
+
+        input1.validate_context(context_);
+
         if (!boot_context_generated_)
         {
             throw std::invalid_argument(
@@ -7186,11 +5250,27 @@ namespace heongpu
                 "generating Bootstrapping parameters!");
         }
 
+        // An input above level 0 is brought down to it.
+        if (input1.level() > 0)
+        {
+            Ciphertext<Scheme::CKKS> dropped;
+            copy_to_stream(input1, dropped, options.stream_);
+            while (dropped.level() > 0)
+            {
+                mod_drop_inplace(dropped, options);
+            }
+            return regular_bootstrapping_ckks(dropped, galois_key, relin_key,
+                                              swk_dense_to_sparse,
+                                              swk_sparse_to_dense, options);
+        }
+
         // Raise modulus
         int current_decomp_count = context_->Q_size - input1.depth_;
         if (current_decomp_count != 1)
         {
-            throw std::logic_error("Ciphertexts leveled should be at max!");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled should be at max! The ciphertext has ",
+                current_decomp_count, " moduli, expected ", 1, "."));
         }
 
         Ciphertext<Scheme::CKKS> scaled_input1 = input1;
@@ -7227,11 +5307,11 @@ namespace heongpu
                                 c_raised.scale()),
                      c_raised, options);
         }
-        c_raised.encoding_ = encoding::COEFFICIENT;
+        c_raised.encoding_ = encoding::coefficient;
 
         // Coeff to slot
         std::vector<heongpu::Ciphertext<Scheme::CKKS>> enc_results =
-            coeff_to_slot_v2(c_raised, galois_key, options); // c_raised
+            coeff_to_slot(c_raised, galois_key, options); // c_raised
 
         Ciphertext<Scheme::CKKS> ciph_sin0 =
             eval_mod(enc_results[0], relin_key, options);
@@ -7242,19 +5322,38 @@ namespace heongpu
 
         // Slot to coeff
         Ciphertext<Scheme::CKKS> StoC_results =
-            slot_to_coeff_v2(ciph_sin0, ciph_sin1, galois_key, options);
+            slot_to_coeff(ciph_sin0, ciph_sin1, galois_key, options);
         StoC_results.scale_ = scale_boot_;
         // Bootstrapping API returns a regular CKKS slot ciphertext.
-        StoC_results.encoding_ = encoding::SLOT;
+        StoC_results.encoding_ = encoding::slot;
 
         return StoC_results;
     }
 
     __host__ Ciphertext<Scheme::CKKS>
-    HEArithmeticOperator<Scheme::CKKS>::slim_bootstrapping(
-        Ciphertext<Scheme::CKKS>& input1, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
+    HEArithmeticOperator<Scheme::CKKS>::slim_bootstrapping_ckks(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        Switchkey<Scheme::CKKS>* swk_dense_to_sparse,
+        Switchkey<Scheme::CKKS>* swk_sparse_to_dense,
+        const ExecutionOptions& options)
     {
+        // The bootstrapping plans its own levels and scales, from its input
+        // rescaled if it needs it.
+        if (automatic())
+        {
+            Ciphertext<Scheme::CKKS> storage;
+            const Ciphertext<Scheme::CKKS>& first =
+                rescaled(input1, storage, options);
+            ManualScope manual;
+            return slim_bootstrapping_ckks(first, galois_key, relin_key,
+                                           swk_dense_to_sparse,
+                                           swk_sparse_to_dense, options);
+        }
+
+        input1.validate_context(context_);
+
         if (!boot_context_generated_)
         {
             throw std::invalid_argument(
@@ -7262,93 +5361,79 @@ namespace heongpu
                 "generating Bootstrapping parameters!");
         }
 
-        // Raise modulus
-        int current_decomp_count = context_->Q_size - input1.depth_;
-        if (current_decomp_count != (1 + StoC_piece_))
+        // An input above the SlotToCoeff start level is brought down to it.
+        if (input1.level() > stc_config_.level_start_)
         {
-            throw std::logic_error("Ciphertexts leveled should be at max!");
+            Ciphertext<Scheme::CKKS> dropped;
+            copy_to_stream(input1, dropped, options.stream_);
+            while (dropped.level() > stc_config_.level_start_)
+            {
+                mod_drop_inplace(dropped, options);
+            }
+            return slim_bootstrapping_ckks(dropped, galois_key, relin_key,
+                                           swk_dense_to_sparse,
+                                           swk_sparse_to_dense, options);
         }
 
-        ExecutionOptions options_inner =
-            ExecutionOptions()
-                .set_stream(options.stream_)
-                .set_storage_type(storage_type::DEVICE)
-                .set_initial_location(true);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = options.stream_};
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = options.stream_};
+        int current_decomp_count = context_->Q_size - input1.depth_;
+        if (current_decomp_count != (stc_config_.level_start_ + 1))
+        {
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled should be at max! The ciphertext has ",
+                current_decomp_count, " moduli, expected ",
+                stc_config_.level_start_ + 1, "."));
+        }
 
         // Slot to coeff
         Ciphertext<Scheme::CKKS> StoC_results =
-            solo_slot_to_coeff(input1, galois_key, options_inner);
+            solo_slot_to_coeff(input1, galois_key, options);
 
-        DeviceVector<Data64> input_intt_poly(2 * context_->n, options.stream_);
-        input_storage_manager(
-            StoC_results,
-            [&](Ciphertext<Scheme::CKKS>& StoC_results_)
-            {
-                gpuntt::GPU_INTT(StoC_results.data(), input_intt_poly.data(),
-                                 context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt, 2, 1);
-            },
-            options, false);
+        // Raise modulus
+        Ciphertext<Scheme::CKKS> scaled_input1 = StoC_results;
+        double q0OverMessageRatio = std::exp2(std::round(
+            std::log2(static_cast<double>(context_->prime_vector_[0].value) /
+                      eval_mod_config_.message_ratio_)));
 
-        Ciphertext<Scheme::CKKS> c_raised =
-            operator_ciphertext(scale_boot_, options_inner.stream_);
-        mod_raise_kernel<<<dim3((context_->n >> 8), context_->Q_size, 2), 256,
-                           0, options_inner.stream_>>>(
-            input_intt_poly.data(), c_raised.data(), context_->modulus_->data(),
-            context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        scale_up(StoC_results,
+                 std::round(q0OverMessageRatio / StoC_results.scale()),
+                 scaled_input1, options);
 
-        gpuntt::GPU_NTT_Inplace(c_raised.data(), context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * context_->Q_size, context_->Q_size);
-        c_raised.encoding_ = encoding::COEFFICIENT;
+        if (std::round((static_cast<double>(context_->prime_vector_[0].value) /
+                        eval_mod_config_.message_ratio_) /
+                       scaled_input1.scale()) > 1.0)
+        {
+            scale_up(scaled_input1,
+                     std::round((static_cast<double>(
+                                     context_->prime_vector_[0].value) /
+                                 eval_mod_config_.message_ratio_) /
+                                scaled_input1.scale()),
+                     scaled_input1, options);
+        }
+
+        Ciphertext<Scheme::CKKS> c_raised = mod_up_from_q0(
+            scaled_input1, swk_dense_to_sparse, swk_sparse_to_dense, options);
+
+        if ((eval_mod_config_.scaling_factor_ /
+             eval_mod_config_.message_ratio_) /
+                c_raised.scale() >
+            1.0)
+        {
+            scale_up(c_raised,
+                     std::round((eval_mod_config_.scaling_factor_ /
+                                 eval_mod_config_.message_ratio_) /
+                                c_raised.scale()),
+                     c_raised, options);
+        }
+        c_raised.encoding_ = encoding::coefficient;
 
         // Coeff to slot
         Ciphertext<Scheme::CKKS> CtoS_results =
-            solo_coeff_to_slot(c_raised, galois_key, options_inner);
+            solo_coeff_to_slot(c_raised, galois_key, options);
 
-        // Exponentiate
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options_inner.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(CtoS_results, relin_key, options_inner);
-
-        // Compute sine
         Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options_inner.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options_inner); // conjugate
-        sub(ciph_exp, ciph_neg_exp, ciph_sin, options_inner);
-
-        // Scale
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options_inner.stream_>>>(
-            ciph_sin.data(), encoded_complex_minus_iscale_.data(),
-            ciph_sin.data(), context_->modulus_->data(), context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options_inner);
+            eval_mod(CtoS_results, relin_key, options);
         ciph_sin.scale_ = scale_boot_;
+        ciph_sin.encoding_ = encoding::slot;
 
         return ciph_sin;
     }
@@ -7358,6 +5443,11 @@ namespace heongpu
         double scale)
         : HEOperator<Scheme::CKKS>(context, encoder)
     {
+        // Logic operations and their bootstrapping plan their levels and
+        // scales themselves. In rescale_mode::automatic only the
+        // bootstrapping ones are supported.
+        manual_only_ = true;
+
         if (scale == 0.0)
         {
             throw std::invalid_argument(
@@ -7373,56 +5463,95 @@ namespace heongpu
     }
 
     __host__ void HELogicOperator<Scheme::CKKS>::generate_bootstrapping_params(
+        const CKKSBootstrappingPreset& preset)
+    {
+        if (preset.logic_type == logic_bootstrapping_type::none)
+        {
+            throw ParameterError(
+                "The preset is not a bit or gate bootstrapping preset!");
+        }
+        generate_bootstrapping_params(preset.scale, preset.config,
+                                      preset.logic_type);
+    }
+
+    __host__ void HELogicOperator<Scheme::CKKS>::generate_bootstrapping_params(
         const double scale, const BootstrappingConfig& config,
         const logic_bootstrapping_type& boot_type)
     {
+        check_bootstrapping_output(
+            bootstrapping_levels(config, boot_type).output_level, scale);
+        ManualScope manual;
         if (!boot_context_generated_)
         {
             scale_boot_ = scale;
             CtoS_piece_ = config.CtoS_piece_;
             StoC_piece_ = config.StoC_piece_;
-            taylor_number_ = config.taylor_number_;
-            less_key_mode_ = config.less_key_mode_;
 
-            int division = static_cast<int>(round(
-                static_cast<double>(context_->prime_vector_[0].value) / scale));
+            cts_config_ = config.cts_config_;
+            stc_config_ = config.stc_config_;
+            eval_mod_config_ = config.eval_mod_config_;
 
+            // Inputs are placed at q0/period (bit: b*q0/2, gate: (b1+b2)*q0/3)
+            // and each function is constant +
+            // amplitude*cos(2*pi*(x-shift)/period).
+            int period;
+            double amplitude;
+            std::vector<double> shifts, constants;
             switch (static_cast<int>(boot_type))
             {
-                case 1: // BIT_BOOTSTRAPPING
-                    if ((division != 2))
-                    {
-                        throw std::invalid_argument(
-                            "Bootstrapping parameters can not be generated, "
-                            "because of context is not suitable for Bit "
-                            "Bootstrapping. Last modulus should be 2*scale!");
-                    }
-                    StoC_level_ = 1 + StoC_piece_;
-                    CtoS_level_ = context_->Q_size;
+                case 1: // logic_bootstrapping_type::bit
+                    period = 2;
+                    amplitude = 0.5;
+                    shifts = {1.0};
+                    constants = {0.5};
                     break;
-                case 2: // GATE_BOOTSTRAPPING
-                    if ((division != 3))
-                    {
-                        throw std::invalid_argument(
-                            "Bootstrapping parameters can not be generated, "
-                            "because of context is not suitable for Gate "
-                            "Bootstrapping. Last modulus should be 3*scale!");
-                    }
-                    StoC_level_ = 1 + StoC_piece_;
-                    CtoS_level_ = context_->Q_size;
+                case 2: // logic_bootstrapping_type::gate (AND, OR, XOR, NAND,
+                        // NOR, XNOR)
+                    period = 3;
+                    amplitude = 2.0 / 3.0;
+                    shifts = {-1.0, 1.5, 1.0, 0.5, 0.0, -0.5};
+                    constants = {1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0,
+                                 2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0};
                     break;
                 default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
+                    throw std::invalid_argument("Invalid Bootstrapping Type");
                     break;
             }
+            double dev = eval_mod_config_.message_ratio_;
+            eval_mod_config_.message_ratio_ = period;
+
+            if (eval_mod_config_.Q_ == 0)
+            {
+                eval_mod_config_.Q_ = context_->prime_vector_[0].value;
+            }
+            if (eval_mod_config_.scaling_factor_ == 0.0)
+            {
+                int bit_length = calculate_bit_count(
+                    context_->prime_vector_[eval_mod_config_.level_start_]
+                        .value);
+                eval_mod_config_.scaling_factor_ =
+                    static_cast<double>(1ULL << bit_length);
+            }
+
+            eval_mod_config_.q_diff_ =
+                static_cast<double>(eval_mod_config_.Q_) /
+                std::pow(2.0, std::round(std::log2(
+                                  static_cast<double>(eval_mod_config_.Q_))));
+            eval_mod_config_.sqrt2pi_ = std::pow(
+                amplitude * scale_boot_ / eval_mod_config_.scaling_factor_,
+                1.0 / std::pow(2.0, eval_mod_config_.double_angle_));
+
+            double CtoS_Scaling =
+                0.5 / (double(eval_mod_config_.K_) * eval_mod_config_.q_diff_);
 
             Vandermonde matrix_gen(context_->n, CtoS_piece_, StoC_piece_,
-                                   less_key_mode_);
+                                   CtoS_Scaling, 1.0, cts_config_.bsgs_ratio_,
+                                   stc_config_.bsgs_ratio_);
 
             V_matrixs_rotated_encoded_ =
-                encode_V_matrixs(matrix_gen, scale_boot_, StoC_level_);
+                encode_V_matrixs(matrix_gen, stc_config_.level_start_);
             V_inv_matrixs_rotated_encoded_ =
-                encode_V_inv_matrixs(matrix_gen, scale_boot_, CtoS_level_);
+                encode_V_inv_matrixs(matrix_gen, cts_config_.level_start_);
 
             V_matrixs_index_ = matrix_gen.V_matrixs_index_;
             V_inv_matrixs_index_ = matrix_gen.V_inv_matrixs_index_;
@@ -7430,71 +5559,39 @@ namespace heongpu
             diags_matrices_bsgs_ = matrix_gen.diags_matrices_bsgs_;
             diags_matrices_inv_bsgs_ = matrix_gen.diags_matrices_inv_bsgs_;
 
-            if (less_key_mode_)
-            {
-                real_shift_n2_bsgs_ = matrix_gen.real_shift_n2_bsgs_;
-                real_shift_n2_inv_bsgs_ = matrix_gen.real_shift_n2_inv_bsgs_;
-            }
+            diags_matrices_bsgs_rot_n1_ =
+                matrix_gen.diags_matrices_bsgs_rot_n1_;
+            diags_matrices_inv_bsgs_rot_n1_ =
+                matrix_gen.diags_matrices_inv_bsgs_rot_n1_;
+
+            diags_matrices_bsgs_rot_n2_ =
+                matrix_gen.diags_matrices_bsgs_rot_n2_;
+            diags_matrices_inv_bsgs_rot_n2_ =
+                matrix_gen.diags_matrices_inv_bsgs_rot_n2_;
 
             key_indexs_ = matrix_gen.key_indexs_;
 
-            // Pre-computed encoded parameters
-            // CtoS
-            Complex64 complex_minus_iover2(0.0, -0.5);
-            encoded_complex_minus_iover2_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_minus_iover2, encoded_complex_minus_iover2_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
+            int K = period * eval_mod_config_.K_;
+            double b = static_cast<double>(eval_mod_config_.K_) /
+                       std::pow(2.0, eval_mod_config_.double_angle_);
+            for (size_t i = 0; i < shifts.size(); i++)
+            {
+                auto cos_coeffs = ApproximateCos(K, 2 * K - 2, dev,
+                                                 eval_mod_config_.double_angle_,
+                                                 period, shifts[i]);
+                std::vector<Complex64> coeffs(cos_coeffs.size());
+                for (size_t j = 0; j < cos_coeffs.size(); j++)
+                {
+                    coeffs[j] = Complex64(
+                        cos_coeffs[j].real() * eval_mod_config_.sqrt2pi_, 0.0);
+                }
 
-            // StoC
-            Complex64 complex_i(0.0, 1.0);
-            encoded_complex_i_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_i, encoded_complex_i_.data(), scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            // Scale part
-            Complex64 complex_minus_iscale(
-                0.0, -(((static_cast<double>(context_->prime_vector_[0].value) *
-                         0.25) /
-                        (scale_boot_ * M_PI))));
-            encoded_complex_minus_iscale_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_minus_iscale, encoded_complex_minus_iscale_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            // Exponentiate
-            Complex64 complex_iscaleoverr(
-                0.0, (((2 * M_PI * scale_boot_) /
-                       static_cast<double>(context_->prime_vector_[0].value))) /
-                         static_cast<double>(1 << taylor_number_));
-            encoded_complex_iscaleoverr_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_iscaleoverr, encoded_complex_iscaleoverr_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            // Gate bootstrapping
-            Complex64 complex_minus_2over6j_(0.0, (1.0 / 3.0));
-            encoded_complex_minus_2over6j_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_minus_2over6j_, encoded_complex_minus_2over6j_.data(),
-                scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-            Complex64 complex_2over6j_(0.0, (-1.0 / 3.0));
-            encoded_complex_2over6j_ =
-                DeviceVector<Data64>(context_->Q_size << context_->n_power);
-            quick_ckks_encoder_constant_complex(
-                complex_2over6j_, encoded_complex_2over6j_.data(), scale_boot_);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
+                logic_polys_.push_back(Polynomial(2 * K - 2, coeffs, true,
+                                                  eval_mod_config_.poly_type_,
+                                                  -b, b));
+                logic_shifts_.push_back(-shifts[i] / K);
+                logic_constants_.push_back(constants[i]);
+            }
 
             boot_context_generated_ = true;
         }
@@ -7508,139 +5605,117 @@ namespace heongpu
     }
 
     __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::bit_bootstrapping(
-        Ciphertext<Scheme::CKKS>& input1, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
+    HELogicOperator<Scheme::CKKS>::bit_bootstrapping_ckks(
+        const Ciphertext<Scheme::CKKS>& input1,
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        Switchkey<Scheme::CKKS>* swk_dense_to_sparse,
+        Switchkey<Scheme::CKKS>* swk_sparse_to_dense,
+        const ExecutionOptions& options)
     {
-        if (!boot_context_generated_)
+        // From the input rescaled if it needs it.
+        if (automatic_context())
+        {
+            Ciphertext<Scheme::CKKS> storage;
+            const Ciphertext<Scheme::CKKS>& first =
+                rescaled(input1, storage, options);
+            ManualScope manual;
+            return bit_bootstrapping_ckks(first, galois_key, relin_key,
+                                          swk_dense_to_sparse,
+                                          swk_sparse_to_dense, options);
+        }
+
+        input1.validate_context(context_);
+
+        if (logic_polys_.size() != 1)
         {
             throw std::invalid_argument(
-                "Bootstrapping operation can not be performed before "
-                "generating Bootstrapping parameters!");
+                "Bit bootstrapping parameters are not generated!");
         }
 
-        // Raise modulus
-        int current_decomp_count = context_->Q_size - input1.depth_;
-        if (current_decomp_count != (1 + StoC_piece_))
-        {
-            throw std::logic_error("Ciphertexts leveled should be at max!");
-        }
-
-        ExecutionOptions options_inner =
-            ExecutionOptions()
-                .set_stream(options.stream_)
-                .set_storage_type(storage_type::DEVICE)
-                .set_initial_location(true);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = options.stream_};
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = options.stream_};
-
-        // Slot to coeff
-        Ciphertext<Scheme::CKKS> StoC_results =
-            solo_slot_to_coeff(input1, galois_key, options_inner);
-
-        DeviceVector<Data64> input_intt_poly(2 * context_->n, options.stream_);
-        input_storage_manager(
-            StoC_results,
-            [&](Ciphertext<Scheme::CKKS>& StoC_results_)
-            {
-                gpuntt::GPU_INTT(StoC_results.data(), input_intt_poly.data(),
-                                 context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt, 2, 1);
-            },
-            options, false);
-
-        Ciphertext<Scheme::CKKS> c_raised =
-            operator_ciphertext(scale_boot_, options_inner.stream_);
-        mod_raise_kernel<<<dim3((context_->n >> 8), context_->Q_size, 2), 256,
-                           0, options_inner.stream_>>>(
-            input_intt_poly.data(), c_raised.data(), context_->modulus_->data(),
-            context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(c_raised.data(), context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * context_->Q_size, context_->Q_size);
-        c_raised.encoding_ = encoding::COEFFICIENT;
-
-        // Coeff to slot
-        Ciphertext<Scheme::CKKS> CtoS_results =
-            solo_coeff_to_slot(c_raised, galois_key, options_inner);
-
-        // Exponentiate
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options_inner.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(CtoS_results, relin_key, options_inner);
-
-        // Compute cosine
-        Ciphertext<Scheme::CKKS> ciph_cos =
-            operator_ciphertext(0, options_inner.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options_inner); // conjugate
-        add(ciph_exp, ciph_neg_exp, ciph_cos, options_inner);
-
-        // Scale
-        double constant_minus_1over4 = (-0.25) * scale_boot_;
-        current_decomp_count = context_->Q_size - ciph_cos.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options_inner.stream_>>>(
-            ciph_cos.data(), constant_minus_1over4, ciph_cos.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        ciph_cos.scale_ = ciph_cos.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_cos.rescale_required_ = true;
-        rescale_inplace(ciph_cos, options_inner);
-
-        //
-        double constant_1over2 = 0.5 * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options_inner.stream_);
-        current_decomp_count = context_->Q_size - ciph_cos.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options_inner.stream_>>>(
-            ciph_cos.data(), constant_1over2, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_cos.depth_;
-        result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_cos.in_ntt_domain_;
-        result.encoding_ = ciph_cos.encoding_;
-        result.rescale_required_ = ciph_cos.rescale_required_;
-        result.relinearization_required_ = ciph_cos.relinearization_required_;
-        result.ciphertext_generated_ = true;
-
-        //
-
-        return result;
+        return logic_bootstrapping(input1, 0, galois_key, relin_key,
+                                   swk_dense_to_sparse, swk_sparse_to_dense,
+                                   options);
     }
 
     __host__ Ciphertext<Scheme::CKKS>
     HELogicOperator<Scheme::CKKS>::gate_bootstrapping(
-        logic_gate gate_type, Ciphertext<Scheme::CKKS>& input1,
-        Ciphertext<Scheme::CKKS>& input2, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
+        logic_gate gate_type, const Ciphertext<Scheme::CKKS>& input1,
+        const Ciphertext<Scheme::CKKS>& input2,
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        Switchkey<Scheme::CKKS>* swk_dense_to_sparse,
+        Switchkey<Scheme::CKKS>* swk_sparse_to_dense,
+        const ExecutionOptions& options)
+    {
+        // From the inputs rescaled if they need it.
+        if (automatic_context())
+        {
+            Ciphertext<Scheme::CKKS> storage1, storage2;
+            const Ciphertext<Scheme::CKKS>& first =
+                rescaled(input1, storage1, options);
+            const Ciphertext<Scheme::CKKS>& second =
+                rescaled(input2, storage2, options);
+            ManualScope manual;
+            return gate_bootstrapping(gate_type, first, second, galois_key,
+                                      relin_key, swk_dense_to_sparse,
+                                      swk_sparse_to_dense, options);
+        }
+
+        if (logic_polys_.size() != 6)
+        {
+            throw std::invalid_argument(
+                "Gate bootstrapping parameters are not generated!");
+        }
+
+        // Inputs above the SlotToCoeff start level are brought down to it.
+        int level = stc_config_.level_start_;
+        if (input1.level() > level || input2.level() > level)
+        {
+            Ciphertext<Scheme::CKKS> dropped1 = input1;
+            Ciphertext<Scheme::CKKS> dropped2 = input2;
+            while (dropped1.level() > level)
+            {
+                mod_drop_inplace(dropped1, options);
+            }
+            while (dropped2.level() > level)
+            {
+                mod_drop_inplace(dropped2, options);
+            }
+            return gate_bootstrapping(gate_type, dropped1, dropped2, galois_key,
+                                      relin_key, swk_dense_to_sparse,
+                                      swk_sparse_to_dense, options);
+        }
+
+        for (const Ciphertext<Scheme::CKKS>* input : {&input1, &input2})
+        {
+            int current_decomp_count = context_->Q_size - input->depth_;
+            if (current_decomp_count != (level + 1))
+            {
+                throw LevelMismatchError(error_message(
+                    "Ciphertexts leveled should be at max! The ciphertext has ",
+                    current_decomp_count, " moduli, expected ", level + 1,
+                    "."));
+            }
+        }
+
+        Ciphertext<Scheme::CKKS> input_ =
+            operator_ciphertext(0, options.stream_);
+        add(input1, input2, input_, options);
+
+        return logic_bootstrapping(input_, static_cast<int>(gate_type),
+                                   galois_key, relin_key, swk_dense_to_sparse,
+                                   swk_sparse_to_dense, options);
+    }
+
+    __host__ Ciphertext<Scheme::CKKS>
+    HELogicOperator<Scheme::CKKS>::logic_bootstrapping(
+        const Ciphertext<Scheme::CKKS>& input1, int function_index,
+        const Galoiskey<Scheme::CKKS>& galois_key,
+        const Relinkey<Scheme::CKKS>& relin_key,
+        Switchkey<Scheme::CKKS>* swk_dense_to_sparse,
+        Switchkey<Scheme::CKKS>* swk_sparse_to_dense,
+        const ExecutionOptions& options)
     {
         if (!boot_context_generated_)
         {
@@ -7649,572 +5724,58 @@ namespace heongpu
                 "generating Bootstrapping parameters!");
         }
 
-        // Raise modulus
+        // An input above the SlotToCoeff start level is brought down to it.
+        if (input1.level() > stc_config_.level_start_)
+        {
+            Ciphertext<Scheme::CKKS> dropped;
+            copy_to_stream(input1, dropped, options.stream_);
+            while (dropped.level() > stc_config_.level_start_)
+            {
+                mod_drop_inplace(dropped, options);
+            }
+            return logic_bootstrapping(dropped, function_index, galois_key,
+                                       relin_key, swk_dense_to_sparse,
+                                       swk_sparse_to_dense, options);
+        }
+
         int current_decomp_count = context_->Q_size - input1.depth_;
-        if (current_decomp_count != (1 + StoC_piece_))
+        if (current_decomp_count != (stc_config_.level_start_ + 1))
         {
-            throw std::logic_error("Ciphertexts leveled should be at max!");
+            throw LevelMismatchError(error_message(
+                "Ciphertexts leveled should be at max! The ciphertext has ",
+                current_decomp_count, " moduli, expected ",
+                stc_config_.level_start_ + 1, "."));
         }
-
-        current_decomp_count = context_->Q_size - input2.depth_;
-        if (current_decomp_count != (1 + StoC_piece_))
-        {
-            throw std::logic_error("Ciphertexts leveled should be at max!");
-        }
-
-        ExecutionOptions options_inner =
-            ExecutionOptions()
-                .set_stream(options.stream_)
-                .set_storage_type(storage_type::DEVICE)
-                .set_initial_location(true);
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = options.stream_};
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = options.stream_};
-
-        Ciphertext<Scheme::CKKS> input_ =
-            operator_ciphertext(0, options_inner.stream_);
-        add(input1, input2, input_);
 
         // Slot to coeff
         Ciphertext<Scheme::CKKS> StoC_results =
-            solo_slot_to_coeff(input_, galois_key, options_inner);
+            solo_slot_to_coeff(input1, galois_key, options);
 
-        DeviceVector<Data64> input_intt_poly(2 * context_->n, options.stream_);
-        input_storage_manager(
+        // Raise modulus
+        Ciphertext<Scheme::CKKS> scaled_input1 = StoC_results;
+        scale_up(
             StoC_results,
-            [&](Ciphertext<Scheme::CKKS>& StoC_results_)
-            {
-                gpuntt::GPU_INTT(StoC_results.data(), input_intt_poly.data(),
-                                 context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt, 2, 1);
-            },
-            options, false);
+            std::round((static_cast<double>(context_->prime_vector_[0].value) /
+                        eval_mod_config_.message_ratio_) /
+                       StoC_results.scale()),
+            scaled_input1, options);
 
-        Ciphertext<Scheme::CKKS> c_raised =
-            operator_ciphertext(scale_boot_, options_inner.stream_);
-        mod_raise_kernel<<<dim3((context_->n >> 8), context_->Q_size, 2), 256,
-                           0, options_inner.stream_>>>(
-            input_intt_poly.data(), c_raised.data(), context_->modulus_->data(),
-            context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::GPU_NTT_Inplace(c_raised.data(), context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                2 * context_->Q_size, context_->Q_size);
-        c_raised.encoding_ = encoding::COEFFICIENT;
+        Ciphertext<Scheme::CKKS> c_raised = mod_up_from_q0(
+            scaled_input1, swk_dense_to_sparse, swk_sparse_to_dense, options);
+        c_raised.encoding_ = encoding::coefficient;
 
         // Coeff to slot
         Ciphertext<Scheme::CKKS> CtoS_results =
-            solo_coeff_to_slot(c_raised, galois_key, options_inner);
+            solo_coeff_to_slot(c_raised, galois_key, options);
 
         Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options_inner.stream_);
-
-        switch (gate_type)
-        {
-            case logic_gate::AND:
-                result = AND_approximation(CtoS_results, galois_key, relin_key,
-                                           options_inner);
-                break;
-            case logic_gate::OR:
-                result = OR_approximation(CtoS_results, galois_key, relin_key,
-                                          options_inner);
-                break;
-            case logic_gate::XOR:
-                result = XOR_approximation(CtoS_results, galois_key, relin_key,
-                                           options_inner);
-                break;
-            case logic_gate::NAND:
-                result = NAND_approximation(CtoS_results, galois_key, relin_key,
-                                            options_inner);
-                break;
-            case logic_gate::NOR:
-                result = NOR_approximation(CtoS_results, galois_key, relin_key,
-                                           options_inner);
-                break;
-            case logic_gate::XNOR:
-                result = XNOR_approximation(CtoS_results, galois_key, relin_key,
-                                            options_inner);
-                break;
-            default:
-                throw std::invalid_argument("Unknown Gate Type!");
-        }
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::AND_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        //////////////////////////////
-        // plain add
-        double constant_pioversome_ =
-            (context_->prime_vector_[0].value / (12.0 * scale_boot_)) *
-            scale_boot_;
-        Ciphertext<Scheme::CKKS> cipher_add =
-            operator_ciphertext(0, options.stream_);
-        int current_decomp_count = context_->Q_size - cipher.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            cipher.data(), constant_pioversome_, cipher_add.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        cipher_add.scheme_ = context_->scheme_;
-        cipher_add.ring_size_ = context_->n;
-        cipher_add.coeff_modulus_count_ = context_->Q_size;
-        cipher_add.cipher_size_ = 2;
-        cipher_add.depth_ = cipher.depth_;
-        cipher_add.scale_ = cipher.scale_;
-        cipher_add.in_ntt_domain_ = cipher.in_ntt_domain_;
-        cipher_add.encoding_ = cipher.encoding_;
-        cipher_add.rescale_required_ = cipher.rescale_required_;
-        cipher_add.relinearization_required_ = cipher.relinearization_required_;
-        cipher_add.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(cipher_add, relin_key, options);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options); // conjugate
-        sub(ciph_exp, ciph_neg_exp, ciph_sin, options);
-
-        // Scale
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), encoded_complex_minus_2over6j_.data(),
-            ciph_sin.data(), context_->modulus_->data(), context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options);
-
-        //////////////////////////////
-        // plain add
-        double constant_1over3_ = (1.0 / 3.0) * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), constant_1over3_, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_sin.depth_;
+            eval_mod(CtoS_results, logic_polys_[function_index],
+                     logic_shifts_[function_index], relin_key, options);
         result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_sin.in_ntt_domain_;
-        result.encoding_ = ciph_sin.encoding_;
-        result.rescale_required_ = ciph_sin.rescale_required_;
-        result.relinearization_required_ = ciph_sin.relinearization_required_;
-        result.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::OR_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(cipher, relin_key, options);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options); // conjugate
-        add(ciph_exp, ciph_neg_exp, ciph_sin, options);
-
-        // Scale
-        double constant_minus_2over6_ = -(1.0 / 3.0) * scale_boot_;
-        int current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(ciph_sin.data(), constant_minus_2over6_,
-                               ciph_sin.data(), context_->modulus_->data(),
-                               two_pow_64_, context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options);
-
-        //////////////////////////////
-        // plain add
-        double constant_2over3_ = (2.0 / 3.0) * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), constant_2over3_, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_sin.depth_;
-        result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_sin.in_ntt_domain_;
-        result.encoding_ = ciph_sin.encoding_;
-        result.rescale_required_ = ciph_sin.rescale_required_;
-        result.relinearization_required_ = ciph_sin.relinearization_required_;
-        result.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::XOR_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        //////////////////////////////
-        // plain add
-        double constant_minus_pioversome_ =
-            (-((context_->prime_vector_[0].value) / (12.0 * scale_boot_))) *
-            scale_boot_;
-        Ciphertext<Scheme::CKKS> cipher_add =
-            operator_ciphertext(0, options.stream_);
-        int current_decomp_count = context_->Q_size - cipher.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            cipher.data(), constant_minus_pioversome_, cipher_add.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        cipher_add.scheme_ = context_->scheme_;
-        cipher_add.ring_size_ = context_->n;
-        cipher_add.coeff_modulus_count_ = context_->Q_size;
-        cipher_add.cipher_size_ = 2;
-        cipher_add.depth_ = cipher.depth_;
-        cipher_add.scale_ = cipher.scale_;
-        cipher_add.in_ntt_domain_ = cipher.in_ntt_domain_;
-        cipher_add.encoding_ = cipher.encoding_;
-        cipher_add.rescale_required_ = cipher.rescale_required_;
-        cipher_add.relinearization_required_ = cipher.relinearization_required_;
-        cipher_add.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(cipher_add, relin_key, options);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options); // conjugate
-        sub(ciph_exp, ciph_neg_exp, ciph_sin, options);
-
-        // Scale
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), encoded_complex_2over6j_.data(), ciph_sin.data(),
-            context_->modulus_->data(), context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options);
-
-        //////////////////////////////
-        // plain add
-        double constant_1over3_ = (1.0 / 3.0) * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), constant_1over3_, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_sin.depth_;
-        result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_sin.in_ntt_domain_;
-        result.encoding_ = ciph_sin.encoding_;
-        result.rescale_required_ = ciph_sin.rescale_required_;
-        result.relinearization_required_ = ciph_sin.relinearization_required_;
-        result.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::NAND_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        //////////////////////////////
-        // plain add
-        double constant_pioversome_ =
-            (context_->prime_vector_[0].value / (12.0 * scale_boot_)) *
-            scale_boot_;
-        Ciphertext<Scheme::CKKS> cipher_add =
-            operator_ciphertext(0, options.stream_);
-        int current_decomp_count = context_->Q_size - cipher.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            cipher.data(), constant_pioversome_, cipher_add.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        cipher_add.scheme_ = context_->scheme_;
-        cipher_add.ring_size_ = context_->n;
-        cipher_add.coeff_modulus_count_ = context_->Q_size;
-        cipher_add.cipher_size_ = 2;
-        cipher_add.depth_ = cipher.depth_;
-        cipher_add.scale_ = cipher.scale_;
-        cipher_add.in_ntt_domain_ = cipher.in_ntt_domain_;
-        cipher_add.encoding_ = cipher.encoding_;
-        cipher_add.rescale_required_ = cipher.rescale_required_;
-        cipher_add.relinearization_required_ = cipher.relinearization_required_;
-        cipher_add.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(cipher_add, relin_key, options);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options); // conjugate
-        sub(ciph_exp, ciph_neg_exp, ciph_sin, options);
-
-        // Scale
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), encoded_complex_2over6j_.data(), ciph_sin.data(),
-            context_->modulus_->data(), context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options);
-
-        //////////////////////////////
-        // plain add
-        double constant_2over3_ = (2.0 / 3.0) * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), constant_2over3_, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_sin.depth_;
-        result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_sin.in_ntt_domain_;
-        result.encoding_ = ciph_sin.encoding_;
-        result.rescale_required_ = ciph_sin.rescale_required_;
-        result.relinearization_required_ = ciph_sin.relinearization_required_;
-        result.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::NOR_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(cipher, relin_key, options);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options); // conjugate
-        add(ciph_exp, ciph_neg_exp, ciph_sin, options);
-
-        // Scale
-        double constant_2over6_ = 1.0 / 3.0 * scale_boot_;
-        int current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipher_constant_plain_multiplication_kernel<<<
-            dim3((context_->n >> 8), current_decomp_count, 2), 256, 0,
-            options.stream_>>>(ciph_sin.data(), constant_2over6_,
-                               ciph_sin.data(), context_->modulus_->data(),
-                               two_pow_64_, context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options);
-
-        //////////////////////////////
-        // plain add
-        double constant_1over3_ = (1.0 / 3.0) * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), constant_1over3_, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_sin.depth_;
-        result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_sin.in_ntt_domain_;
-        result.encoding_ = ciph_sin.encoding_;
-        result.rescale_required_ = ciph_sin.rescale_required_;
-        result.relinearization_required_ = ciph_sin.relinearization_required_;
-        result.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        return result;
-    }
-
-    __host__ Ciphertext<Scheme::CKKS>
-    HELogicOperator<Scheme::CKKS>::XNOR_approximation(
-        Ciphertext<Scheme::CKKS>& cipher, Galoiskey<Scheme::CKKS>& galois_key,
-        Relinkey<Scheme::CKKS>& relin_key, const ExecutionOptions& options)
-    {
-        //////////////////////////////
-        // plain add
-        double constant_minus_pioversome_ =
-            (-((context_->prime_vector_[0].value) / (12.0 * scale_boot_))) *
-            scale_boot_;
-        Ciphertext<Scheme::CKKS> cipher_add =
-            operator_ciphertext(0, options.stream_);
-        int current_decomp_count = context_->Q_size - cipher.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            cipher.data(), constant_minus_pioversome_, cipher_add.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        cipher_add.scheme_ = context_->scheme_;
-        cipher_add.ring_size_ = context_->n;
-        cipher_add.coeff_modulus_count_ = context_->Q_size;
-        cipher_add.cipher_size_ = 2;
-        cipher_add.depth_ = cipher.depth_;
-        cipher_add.scale_ = cipher.scale_;
-        cipher_add.in_ntt_domain_ = cipher.in_ntt_domain_;
-        cipher_add.encoding_ = cipher.encoding_;
-        cipher_add.rescale_required_ = cipher.rescale_required_;
-        cipher_add.relinearization_required_ = cipher.relinearization_required_;
-        cipher_add.ciphertext_generated_ = true;
-        //////////////////////////////
-
-        Ciphertext<Scheme::CKKS> ciph_neg_exp =
-            operator_ciphertext(0, options.stream_);
-        Ciphertext<Scheme::CKKS> ciph_exp =
-            exp_scaled(cipher_add, relin_key, options);
-
-        // Compute sine
-        Ciphertext<Scheme::CKKS> ciph_sin =
-            operator_ciphertext(0, options.stream_);
-        conjugate(ciph_exp, ciph_neg_exp, galois_key,
-                  options); // conjugate
-        sub(ciph_exp, ciph_neg_exp, ciph_sin, options);
-
-        // Scale
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        cipherplain_multiplication_kernel<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), encoded_complex_minus_2over6j_.data(),
-            ciph_sin.data(), context_->modulus_->data(), context_->n_power);
-        ciph_sin.scale_ = ciph_sin.scale_ * scale_boot_;
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-        ciph_sin.rescale_required_ = true;
-        rescale_inplace(ciph_sin, options);
-
-        //////////////////////////////
-        // plain add
-        double constant_2over3_ = (2.0 / 3.0) * scale_boot_;
-        Ciphertext<Scheme::CKKS> result =
-            operator_ciphertext(0, options.stream_);
-        current_decomp_count = context_->Q_size - ciph_sin.depth_;
-        addition_constant_plain_ckks_poly<<<dim3((context_->n >> 8),
-                                                 current_decomp_count, 2),
-                                            256, 0, options.stream_>>>(
-            ciph_sin.data(), constant_2over3_, result.data(),
-            context_->modulus_->data(), two_pow_64_, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        result.scheme_ = context_->scheme_;
-        result.ring_size_ = context_->n;
-        result.coeff_modulus_count_ = context_->Q_size;
-        result.cipher_size_ = 2;
-        result.depth_ = ciph_sin.depth_;
-        result.scale_ = scale_boot_;
-        result.in_ntt_domain_ = ciph_sin.in_ntt_domain_;
-        result.encoding_ = ciph_sin.encoding_;
-        result.rescale_required_ = ciph_sin.rescale_required_;
-        result.relinearization_required_ = ciph_sin.relinearization_required_;
-        result.ciphertext_generated_ = true;
-        //////////////////////////////
+        add_plain_complex(result,
+                          Complex64(logic_constants_[function_index], 0.0),
+                          result, options);
+        result.encoding_ = encoding::slot;
 
         return result;
     }
@@ -8224,14 +5785,14 @@ namespace heongpu
         const ExecutionOptions& options)
     {
         // TODO: make it efficient
-        negate_inplace(input1, options);
+        negate(input1, output, options);
 
         int current_decomp_count = context_->Q_size - input1.depth_;
 
         addition_plain_ckks_poly<<<dim3((context_->n >> 8),
                                         current_decomp_count, 2),
                                    256, 0, options.stream_>>>(
-            input1.data(), encoded_constant_one_.data(), output.data(),
+            output.data(), encoded_constant_one_.data(), output.data(),
             context_->modulus_->data(), context_->n_power);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
     }

@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -57,17 +58,21 @@ namespace heongpu
          * public key.
          */
         __host__ void generate_public_key_share(
-            MultipartyPublickey<Scheme::BFV>& pk, Secretkey<Scheme::BFV>& sk,
+            MultipartyPublickey<Scheme::BFV>& pk,
+            const Secretkey<Scheme::BFV>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            sk.validate_context(context_);
             if (!sk.secret_key_generated_)
             {
-                throw std::logic_error("Secretkey is not generated!");
+                throw StateError("Secretkey is not generated! Call "
+                                 "HEKeyGenerator::generate_secret_key first.");
             }
 
             if (pk.public_key_generated_)
             {
-                throw std::logic_error("Publickey is already generated!");
+                throw StateError("Publickey is already generated! "
+                                 "Use a new Publickey object.");
             }
 
             input_storage_manager(
@@ -103,7 +108,7 @@ namespace heongpu
          * public key will be stored.
          */
         __host__ void assemble_public_key_share(
-            std::vector<MultipartyPublickey<Scheme::BFV>>& all_pk,
+            const std::vector<MultipartyPublickey<Scheme::BFV>>& all_pk,
             Publickey<Scheme::BFV>& pk,
             const ExecutionOptions& options = ExecutionOptions())
         {
@@ -157,21 +162,15 @@ namespace heongpu
          * relinearization key.
          */
         __host__ void generate_relin_key_init(
-            MultipartyRelinkey<Scheme::BFV>& rk, Secretkey<Scheme::BFV>& sk,
+            MultipartyRelinkey<Scheme::BFV>& rk,
+            const Secretkey<Scheme::BFV>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(rk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_relin_key_method_I_stage_1(rk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_bfv_relin_key_method_II_stage_1(rk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            input_storage_manager(
+                sk,
+                [&](Secretkey<Scheme::BFV>& sk_)
+                { generate_bfv_relin_key_stage_1(rk, sk_, options); },
+                options, false);
         }
 
         /**
@@ -190,30 +189,29 @@ namespace heongpu
          * relinearization key piece.
          */
         __host__ void generate_relin_key_share(
-            MultipartyRelinkey<Scheme::BFV>& rk_s1_common,
-            MultipartyRelinkey<Scheme::BFV>& rk_new, Secretkey<Scheme::BFV>& sk,
+            const MultipartyRelinkey<Scheme::BFV>& rk_s1_common,
+            MultipartyRelinkey<Scheme::BFV>& rk_new,
+            const Secretkey<Scheme::BFV>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            if ((rk_s1_common.scheme_ != rk_new.scheme_) ||
-                (rk_s1_common.key_type != rk_new.key_type))
+            if (rk_s1_common.scheme_ != rk_new.scheme_)
             {
                 throw std::invalid_argument("Invalid relinkey parameters!");
             }
 
-            switch (static_cast<int>(rk_s1_common.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_relin_key_method_I_stage_3(rk_s1_common, rk_new,
-                                                        sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_bfv_relin_key_method_II_stage_3(
-                        rk_s1_common, rk_new, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            input_storage_manager(
+                rk_s1_common,
+                [&](MultipartyRelinkey<Scheme::BFV>& rk_s1_common_)
+                {
+                    input_storage_manager(
+                        sk,
+                        [&](Secretkey<Scheme::BFV>& sk_) {
+                            generate_bfv_relin_key_stage_3(
+                                rk_s1_common_, rk_new, sk_, options);
+                        },
+                        options, false);
+                },
+                options, false);
         }
 
         /**
@@ -230,11 +228,15 @@ namespace heongpu
          * aggregated key.
          */
         __host__ void assemble_relin_key_init(
-            std::vector<MultipartyRelinkey<Scheme::BFV>>& all_rk,
+            const std::vector<MultipartyRelinkey<Scheme::BFV>>& all_rk,
             MultipartyRelinkey<Scheme::BFV>& rk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            generate_relin_key_stage_2(all_rk, rk, options);
+            input_vector_storage_manager(
+                all_rk,
+                [&](std::vector<MultipartyRelinkey<Scheme::BFV>>& all_rk_)
+                { generate_relin_key_stage_2(all_rk_, rk, options); },
+                options, false);
         }
 
         /**
@@ -253,12 +255,25 @@ namespace heongpu
          * aggregated key.
          */
         __host__ void assemble_relin_key_share(
-            std::vector<MultipartyRelinkey<Scheme::BFV>>& all_rk,
-            MultipartyRelinkey<Scheme::BFV>& rk_common_stage1,
+            const std::vector<MultipartyRelinkey<Scheme::BFV>>& all_rk,
+            const MultipartyRelinkey<Scheme::BFV>& rk_common_stage1,
             Relinkey<Scheme::BFV>& rk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            generate_relin_key_stage_4(all_rk, rk_common_stage1, rk, options);
+            input_vector_storage_manager(
+                all_rk,
+                [&](std::vector<MultipartyRelinkey<Scheme::BFV>>& all_rk_)
+                {
+                    input_storage_manager(
+                        rk_common_stage1,
+                        [&](MultipartyRelinkey<Scheme::BFV>& rk_common_stage1_)
+                        {
+                            generate_relin_key_stage_4(
+                                all_rk_, rk_common_stage1_, rk, options);
+                        },
+                        options, false);
+                },
+                options, false);
         }
 
         /**
@@ -270,21 +285,15 @@ namespace heongpu
          * Galois key.
          */
         __host__ void generate_galois_key_share(
-            MultipartyGaloiskey<Scheme::BFV>& gk, Secretkey<Scheme::BFV>& sk,
+            MultipartyGaloiskey<Scheme::BFV>& gk,
+            const Secretkey<Scheme::BFV>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(gk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_galois_key_method_I_stage_1(gk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_galois_key_method_II_stage_1(gk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            input_storage_manager(
+                sk,
+                [&](Secretkey<Scheme::BFV>& sk_)
+                { generate_galois_key_stage_1(gk, sk_, options); },
+                options, false);
         }
 
         /**
@@ -303,11 +312,15 @@ namespace heongpu
          * scheme is specified.
          */
         __host__ void assemble_galois_key_share(
-            std::vector<MultipartyGaloiskey<Scheme::BFV>>& all_gk,
+            const std::vector<MultipartyGaloiskey<Scheme::BFV>>& all_gk,
             Galoiskey<Scheme::BFV>& gk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            generate_galois_key_stage_2(all_gk, gk, options);
+            input_vector_storage_manager(
+                all_gk,
+                [&](std::vector<MultipartyGaloiskey<Scheme::BFV>>& all_gk_)
+                { generate_galois_key_stage_2(all_gk_, gk, options); },
+                options, false);
         }
 
         /**
@@ -326,15 +339,29 @@ namespace heongpu
          * partially decrypted data.
          */
         __host__ void
-        decrypt_partial(Ciphertext<Scheme::BFV>& ciphertext,
-                        Secretkey<Scheme::BFV>& sk,
+        decrypt_partial(const Ciphertext<Scheme::BFV>& ciphertext,
+                        const Secretkey<Scheme::BFV>& sk,
                         Ciphertext<Scheme::BFV>& partial_ciphertext,
                         const ExecutionOptions& options = ExecutionOptions())
         {
-            partial_decrypt_stage_1(ciphertext, sk, partial_ciphertext,
-                                    options.stream_);
+            input_storage_manager(
+                ciphertext,
+                [&](Ciphertext<Scheme::BFV>& ciphertext_)
+                {
+                    input_storage_manager(
+                        sk,
+                        [&](Secretkey<Scheme::BFV>& sk_)
+                        {
+                            partial_decrypt_stage_1(ciphertext_, sk_,
+                                                    partial_ciphertext,
+                                                    options.stream_);
+                        },
+                        options, false);
+                },
+                options, false);
 
             partial_ciphertext.scheme_ = context_->scheme_;
+            partial_ciphertext.context_id_ = context_->context_id_;
             partial_ciphertext.ring_size_ = context_->n;
             partial_ciphertext.coeff_modulus_count_ = context_->Q_size;
             partial_ciphertext.cipher_size_ = 2;
@@ -357,7 +384,7 @@ namespace heongpu
          * all partial decryptions.
          */
         __host__ void
-        decrypt(std::vector<Ciphertext<Scheme::BFV>>& ciphertexts,
+        decrypt(const std::vector<Ciphertext<Scheme::BFV>>& ciphertexts,
                 Plaintext<Scheme::BFV>& plaintext,
                 const ExecutionOptions& options = ExecutionOptions())
         {
@@ -390,9 +417,10 @@ namespace heongpu
                             partial_decrypt_stage_2(ciphertexts_, plaintext_,
                                                     options.stream_);
 
-                            plaintext.plain_size_ = context_->n;
-                            plaintext.scheme_ = context_->scheme_;
-                            plaintext.in_ntt_domain_ = false;
+                            plaintext_.plain_size_ = context_->n;
+                            plaintext_.scheme_ = context_->scheme_;
+                            plaintext_.context_id_ = context_->context_id_;
+                            plaintext_.in_ntt_domain_ = false;
                         },
                         options);
                 },
@@ -419,8 +447,9 @@ namespace heongpu
          * @param seed         Common seed material for the RNG.
          */
         __host__ void distributed_bootstrapping_participant(
-            Ciphertext<Scheme::BFV>& common, Ciphertext<Scheme::BFV>& output,
-            Secretkey<Scheme::BFV>& secret_key, const RNGSeed& seed,
+            const Ciphertext<Scheme::BFV>& common,
+            Ciphertext<Scheme::BFV>& output,
+            const Secretkey<Scheme::BFV>& secret_key, const RNGSeed& seed,
             const ExecutionOptions& options = ExecutionOptions())
         {
             input_storage_manager(
@@ -440,6 +469,7 @@ namespace heongpu
                                         options.stream_);
 
                                     output.scheme_ = context_->scheme_;
+                                    output.context_id_ = context_->context_id_;
                                     output.ring_size_ = context_->n;
                                     output.coeff_modulus_count_ =
                                         context_->Q_size;
@@ -476,9 +506,9 @@ namespace heongpu
          * @param seed         Common seed material for the RNG.
          */
         __host__ void distributed_bootstrapping_coordinator(
-            std::vector<Ciphertext<Scheme::BFV>>& ciphertexts,
-            Ciphertext<Scheme::BFV>& common, Ciphertext<Scheme::BFV>& output,
-            const RNGSeed& seed,
+            const std::vector<Ciphertext<Scheme::BFV>>& ciphertexts,
+            const Ciphertext<Scheme::BFV>& common,
+            Ciphertext<Scheme::BFV>& output, const RNGSeed& seed,
             const ExecutionOptions& options = ExecutionOptions())
         {
             input_vector_storage_manager(
@@ -498,6 +528,7 @@ namespace heongpu
                                         options.stream_);
 
                                     output.scheme_ = context_->scheme_;
+                                    output.context_id_ = context_->context_id_;
                                     output.ring_size_ = context_->n;
                                     output.coeff_modulus_count_ =
                                         context_->Q_size;
@@ -531,20 +562,11 @@ namespace heongpu
             Publickey<Scheme::BFV>& pk, const cudaStream_t stream);
 
         __host__ void
-        generate_relin_key_method_I_stage_1(MultipartyRelinkey<Scheme::BFV>& rk,
-                                            Secretkey<Scheme::BFV>& sk,
-                                            const ExecutionOptions& options);
+        generate_bfv_relin_key_stage_1(MultipartyRelinkey<Scheme::BFV>& rk,
+                                       Secretkey<Scheme::BFV>& sk,
+                                       const ExecutionOptions& options);
 
-        __host__ void generate_relin_key_method_I_stage_3(
-            MultipartyRelinkey<Scheme::BFV>& rk_stage_1,
-            MultipartyRelinkey<Scheme::BFV>& rk_stage_2,
-            Secretkey<Scheme::BFV>& sk, const ExecutionOptions& options);
-
-        __host__ void generate_bfv_relin_key_method_II_stage_1(
-            MultipartyRelinkey<Scheme::BFV>& rk, Secretkey<Scheme::BFV>& sk,
-            const ExecutionOptions& options);
-
-        __host__ void generate_bfv_relin_key_method_II_stage_3(
+        __host__ void generate_bfv_relin_key_stage_3(
             MultipartyRelinkey<Scheme::BFV>& rk_stage_1,
             MultipartyRelinkey<Scheme::BFV>& rk_stage_2,
             Secretkey<Scheme::BFV>& sk, const ExecutionOptions& options);
@@ -559,13 +581,10 @@ namespace heongpu
             MultipartyRelinkey<Scheme::BFV>& rk_common_stage1,
             Relinkey<Scheme::BFV>& rk, const ExecutionOptions& options);
 
-        __host__ void generate_galois_key_method_I_stage_1(
-            MultipartyGaloiskey<Scheme::BFV>& gk, Secretkey<Scheme::BFV>& sk,
-            const ExecutionOptions& options);
-
-        __host__ void generate_galois_key_method_II_stage_1(
-            MultipartyGaloiskey<Scheme::BFV>& gk, Secretkey<Scheme::BFV>& sk,
-            const ExecutionOptions& options);
+        __host__ void
+        generate_galois_key_stage_1(MultipartyGaloiskey<Scheme::BFV>& gk,
+                                    Secretkey<Scheme::BFV>& sk,
+                                    const ExecutionOptions& options);
 
         __host__ void generate_galois_key_stage_2(
             std::vector<MultipartyGaloiskey<Scheme::BFV>>& all_gk,

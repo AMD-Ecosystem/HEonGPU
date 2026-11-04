@@ -11,26 +11,12 @@
 
 namespace heongpu
 {
-    __global__ void cipher_broadcast_kernel(Data64* input, Data64* output,
-                                            Modulus64* modulus, int n_power,
-                                            int rns_mod_count);
-    __global__ void
-    cipher_broadcast_leveled_kernel(Data64* input, Data64* output,
-                                    Modulus64* modulus, int first_rns_mod_count,
-                                    int current_rns_mod_count, int n_power);
-
     __global__ void keyswitch_multiply_accumulate_kernel(
         Data64* input, const Data64* __restrict__ relinkey, Data64* output,
         Modulus64* modulus, int n_power, int Q_tilda_size, int iteration_count1,
         int iteration_count2);
 
     __global__ void keyswitch_multiply_accumulate_leveled_kernel(
-        Data64* input, const Data64* __restrict__ relinkey, Data64* output,
-        Modulus64* modulus, int first_rns_mod_count,
-        int current_decomp_mod_count, int iteration_count1,
-        int iteration_count2, int n_power);
-
-    __global__ void keyswitch_multiply_accumulate_leveled_method_II_kernel(
         Data64* input, const Data64* __restrict__ relinkey, Data64* output,
         Modulus64* modulus, int first_rns_mod_count,
         int current_decomp_mod_count, int current_rns_mod_count,
@@ -95,6 +81,14 @@ namespace heongpu
         int d, int current_Qtilda_size, int current_Q_size, int level,
         int* mod_index);
 
+    // base_conversion_DtoQtilde_relin_leveled_kernel for digits of one prime:
+    // lifts each coefficient to its centered representative and reduces it
+    // by the other moduli (Q primes below current_Q_size, then the P primes,
+    // which start level positions later).
+    __global__ void single_prime_digits_to_Qtilde_kernel(
+        Data64* ciphertext, Data64* output, Modulus64* modulus, int n_power,
+        int current_Qtilda_size, int current_Q_size, int level);
+
     __global__ void multiply_accumulate_extended_kernel(
         Data64* input, Data64* relinkey, Data64* output, Modulus64* B_prime,
         int n_power, int d_tilda, int d, int r_prime);
@@ -135,22 +129,8 @@ namespace heongpu
                                         int current_decomposition_count,
                                         int n_power);
 
-    __global__ void
-    cipher_broadcast_switchkey_kernel(Data64* cipher, Data64* out0,
-                                      Data64* out1, Modulus64* modulus,
-                                      int n_power, int decomp_mod_count);
-
-    __global__ void cipher_broadcast_switchkey_method_II_kernel(
-        Data64* cipher, Data64* out0, Data64* out1, Modulus64* modulus,
-        int n_power, int decomp_mod_count);
-
     __global__ void addition_switchkey(Data64* in1, Data64* in2, Data64* out,
                                        Modulus64* modulus, int n_power);
-
-    __global__ void cipher_broadcast_switchkey_leveled_kernel(
-        Data64* cipher, Data64* out0, Data64* out1, Modulus64* modulus,
-        int n_power, int first_rns_mod_count, int current_rns_mod_count,
-        int current_decomp_mod_count);
 
     __global__ void negacyclic_shift_poly_coeffmod_kernel(Data64* cipher_in,
                                                           Data64* cipher_out,
@@ -182,16 +162,6 @@ namespace heongpu
 
     ////////////////////////////////////////
     // Optimized Hoisting-Rotations
-
-    __global__ void ckks_duplicate_kernel(Data64* cipher, Data64* output,
-                                          Modulus64* modulus, int n_power,
-                                          int first_rns_mod_count,
-                                          int current_rns_mod_count,
-                                          int current_decomp_mod_count);
-
-    __global__ void bfv_duplicate_kernel(Data64* cipher, Data64* output1,
-                                         Data64* output2, Modulus64* modulus,
-                                         int n_power, int rns_mod_count);
 
     __global__ void divide_round_lastq_permute_ckks_kernel(
         Data64* input, Data64* input2, Data64* output, Modulus64* modulus,

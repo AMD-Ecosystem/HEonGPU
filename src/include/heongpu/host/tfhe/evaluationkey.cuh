@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -45,7 +46,7 @@ namespace heongpu
          */
         bool is_on_device() const noexcept
         {
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 return true;
             }
@@ -94,7 +95,23 @@ namespace heongpu
 
         void set_context(HEContext<Scheme::TFHE> context)
         {
-            context_ = std::move(context);
+            if (!context)
+                throw ParameterError("HEContext is not set! Pass a context "
+                                     "created with GenHEContext.");
+            if (boot_key_generated_)
+            {
+                if (bk_k_ != context->k_ ||
+                    bk_base_bit_ != context->bk_bg_bit_ ||
+                    bk_length_ != context->bk_l_ ||
+                    bk_stdev_ != context->bk_stdev_ ||
+                    ks_base_bit_ != context->ks_base_bit_ ||
+                    ks_length_ != context->ks_length_)
+                    throw std::invalid_argument(
+                        "Bootstrappingkey context mismatch!");
+                context_ = std::move(context);
+            }
+            else
+                *this = Bootstrappingkey(std::move(context));
         }
 
         /**
@@ -118,44 +135,45 @@ namespace heongpu
               boot_key_generated_(copy.boot_key_generated_),
               storage_type_(copy.storage_type_)
         {
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(copy.stream()));
             if (copy.boot_key_generated_)
             {
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     boot_key_device_location_.resize(
                         copy.boot_key_device_location_.size(),
                         copy.boot_key_device_location_.stream());
-                    cudaMemcpyAsync(
+                    HEONGPU_CUDA_CHECK(cudaMemcpyAsync(
                         boot_key_device_location_.data(),
                         copy.boot_key_device_location_.data(),
                         copy.boot_key_device_location_.size() * sizeof(Data64),
                         cudaMemcpyDeviceToDevice,
-                        copy.boot_key_device_location_
-                            .stream()); // TODO: use cudaStreamPerThread
+                        copy.boot_key_device_location_.stream()));
+                    HEONGPU_CUDA_CHECK(cudaStreamSynchronize(copy.stream()));
 
                     switch_key_device_location_a_.resize(
                         copy.switch_key_device_location_a_.size(),
                         copy.switch_key_device_location_a_.stream());
-                    cudaMemcpyAsync(
+                    HEONGPU_CUDA_CHECK(cudaMemcpyAsync(
                         switch_key_device_location_a_.data(),
                         copy.switch_key_device_location_a_.data(),
                         copy.switch_key_device_location_a_.size() *
                             sizeof(int32_t),
                         cudaMemcpyDeviceToDevice,
-                        copy.switch_key_device_location_a_
-                            .stream()); // TODO: use cudaStreamPerThread
+                        copy.switch_key_device_location_a_.stream()));
+                    HEONGPU_CUDA_CHECK(cudaStreamSynchronize(copy.stream()));
 
                     switch_key_device_location_b_.resize(
                         copy.switch_key_device_location_b_.size(),
                         copy.switch_key_device_location_b_.stream());
-                    cudaMemcpyAsync(
+                    HEONGPU_CUDA_CHECK(cudaMemcpyAsync(
                         switch_key_device_location_b_.data(),
                         copy.switch_key_device_location_b_.data(),
                         copy.switch_key_device_location_b_.size() *
                             sizeof(int32_t),
                         cudaMemcpyDeviceToDevice,
-                        copy.switch_key_device_location_b_
-                            .stream()); // TODO: use cudaStreamPerThread
+                        copy.switch_key_device_location_b_.stream()));
+                    HEONGPU_CUDA_CHECK(cudaStreamSynchronize(copy.stream()));
                 }
                 else
                 {
@@ -218,6 +236,7 @@ namespace heongpu
               switch_key_host_location_b_(
                   std::move(assign.switch_key_host_location_b_))
         {
+            assign.boot_key_generated_ = false;
         }
 
         /**
@@ -235,82 +254,8 @@ namespace heongpu
         {
             if (this != &copy)
             {
-                context_ = copy.context_;
-                bk_k_ = copy.bk_k_;
-                bk_base_bit_ = copy.bk_base_bit_;
-                bk_length_ = copy.bk_length_;
-                bk_stdev_ = copy.bk_stdev_;
-                boot_key_variances_ = copy.boot_key_variances_;
-                ks_base_bit_ = copy.ks_base_bit_;
-                ks_length_ = copy.ks_length_;
-                switch_key_variances_ = copy.switch_key_variances_;
-                boot_key_generated_ = copy.boot_key_generated_;
-                storage_type_ = copy.storage_type_;
-
-                if (copy.boot_key_generated_)
-                {
-                    if (copy.storage_type_ == storage_type::DEVICE)
-                    {
-                        boot_key_device_location_.resize(
-                            copy.boot_key_device_location_.size(),
-                            copy.boot_key_device_location_.stream());
-                        cudaMemcpyAsync(
-                            boot_key_device_location_.data(),
-                            copy.boot_key_device_location_.data(),
-                            copy.boot_key_device_location_.size() *
-                                sizeof(Data64),
-                            cudaMemcpyDeviceToDevice,
-                            copy.boot_key_device_location_
-                                .stream()); // TODO: use cudaStreamPerThread
-
-                        switch_key_device_location_a_.resize(
-                            copy.switch_key_device_location_a_.size(),
-                            copy.switch_key_device_location_a_.stream());
-                        cudaMemcpyAsync(
-                            switch_key_device_location_a_.data(),
-                            copy.switch_key_device_location_a_.data(),
-                            copy.switch_key_device_location_a_.size() *
-                                sizeof(int32_t),
-                            cudaMemcpyDeviceToDevice,
-                            copy.switch_key_device_location_a_
-                                .stream()); // TODO: use cudaStreamPerThread
-
-                        switch_key_device_location_b_.resize(
-                            copy.switch_key_device_location_b_.size(),
-                            copy.switch_key_device_location_b_.stream());
-                        cudaMemcpyAsync(
-                            switch_key_device_location_b_.data(),
-                            copy.switch_key_device_location_b_.data(),
-                            copy.switch_key_device_location_b_.size() *
-                                sizeof(int32_t),
-                            cudaMemcpyDeviceToDevice,
-                            copy.switch_key_device_location_b_
-                                .stream()); // TODO: use cudaStreamPerThread
-                    }
-                    else
-                    {
-                        boot_key_host_location_.resize(
-                            copy.boot_key_host_location_.size());
-                        std::memcpy(boot_key_host_location_.data(),
-                                    copy.boot_key_host_location_.data(),
-                                    copy.boot_key_host_location_.size() *
-                                        sizeof(Data64));
-
-                        switch_key_host_location_a_.resize(
-                            copy.switch_key_host_location_a_.size());
-                        std::memcpy(switch_key_host_location_a_.data(),
-                                    copy.switch_key_host_location_a_.data(),
-                                    copy.switch_key_host_location_a_.size() *
-                                        sizeof(int32_t));
-
-                        switch_key_host_location_b_.resize(
-                            copy.switch_key_host_location_b_.size());
-                        std::memcpy(switch_key_host_location_b_.data(),
-                                    copy.switch_key_host_location_b_.data(),
-                                    copy.switch_key_host_location_b_.size() *
-                                        sizeof(int32_t));
-                    }
-                }
+                Bootstrappingkey temporary(copy);
+                *this = std::move(temporary);
             }
             return *this;
         }
@@ -353,6 +298,7 @@ namespace heongpu
                     std::move(assign.switch_key_device_location_b_);
                 switch_key_host_location_b_ =
                     std::move(assign.switch_key_host_location_b_);
+                assign.boot_key_generated_ = false;
             }
             return *this;
         }
@@ -362,10 +308,10 @@ namespace heongpu
         const scheme_type scheme_ = scheme_type::tfhe;
 
         // Boot Key Context
-        int bk_k_;
-        int bk_base_bit_;
-        int bk_length_;
-        double bk_stdev_;
+        int bk_k_ = 0;
+        int bk_base_bit_ = 0;
+        int bk_length_ = 0;
+        double bk_stdev_ = 0;
 
         DeviceVector<Data64> boot_key_device_location_;
         HostVector<Data64> boot_key_host_location_;
@@ -373,8 +319,8 @@ namespace heongpu
         std::vector<double> boot_key_variances_;
 
         // Switch Key Context
-        int ks_base_bit_;
-        int ks_length_;
+        int ks_base_bit_ = 0;
+        int ks_length_ = 0;
 
         DeviceVector<int32_t> switch_key_device_location_a_;
         HostVector<int32_t> switch_key_host_location_a_;
@@ -385,7 +331,7 @@ namespace heongpu
         std::vector<double> switch_key_variances_;
 
         bool boot_key_generated_ = false;
-        storage_type storage_type_;
+        storage_type storage_type_ = storage_type::device;
 
         void copy_to_device(cudaStream_t stream);
         void remove_from_device(cudaStream_t stream);

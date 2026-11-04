@@ -22,19 +22,10 @@ Core Enumerations
         }
 
 **Key-Switching Method**
-    The algorithm used for key-switching operations like relinearization and
-    rotation is selected automatically from the P modulus base count:
-    `P_size == 1` -> `KEYSWITCHING_METHOD_I`, `P_size > 1` ->
-    `KEYSWITCHING_METHOD_II`. `P_size == 0` is invalid.
-
-    .. code-block:: cpp
-
-        namespace heongpu {
-            enum class keyswitching_type {
-                KEYSWITCHING_METHOD_I,  // Based on Fan-Vercauteren
-                KEYSWITCHING_METHOD_II, // Hybrid method
-            };
-        }
+    Key-switching operations like relinearization and rotation use hybrid
+    key switching. The P modulus base count sets the number of primes per
+    digit; with `P_size == 1` every digit is one prime, which is the
+    classical method. `P_size == 0` is invalid.
 
 Context and Parameter Classes
 -----------------------------
@@ -58,6 +49,50 @@ Context and Parameter Classes
 
             // Finalizes the context and uploads pre-computations to the GPU.
             void generate();
+        };
+
+**rescale_mode** (CKKS)
+    ``rescale_mode::manual`` (the default) leaves rescaling and bringing operands to the same level to the application; with ``rescale_mode::automatic`` the operators do both, see Automatic Rescaling in the User Guide.
+
+    .. code-block:: cpp
+       :linenos:
+
+        // On HEContextImpl<Scheme::CKKS>, after the moduli are set:
+        void set_rescale_mode(rescale_mode mode, double scale = 0.0);
+        rescale_mode get_rescale_mode() const;
+        double get_level_scale(int level) const;  // automatic mode
+
+**HEParams**
+    Chooses the ring size and the primes from what the computation needs, see the Parameter Selection Guide. ``generate()`` returns them as an ``HEParameterSet``, which ``apply(context)`` sets on a context and ``make_context()`` sets on a new one.
+
+    .. code-block:: cpp
+       :linenos:
+
+        template <> struct HEParams<Scheme::CKKS> {
+            int multiplicative_depth = 1;
+            int scale_bit_size = 40;
+            int first_modulus_bit_size = 60;
+            sec_level_type security_level = sec_level_type::sec128;
+            std::size_t poly_modulus_degree = 0;  // 0: the smallest that fits
+            int special_modulus_count = 0;        // 0: as many as fit
+
+            HEParameterSet<Scheme::CKKS> generate() const;
+            HEContext<Scheme::CKKS> make_context() const;
+            double scale() const;
+            // Unset: manual for generate(), automatic for HESession.
+            std::optional<rescale_mode> rescale_mode;
+        };
+
+        template <> struct HEParams<Scheme::BFV> {
+            int multiplicative_depth = 1;
+            Data64 plain_modulus = 0;             // 0: chosen from the bit size
+            int plain_modulus_bit_size = 20;
+            sec_level_type security_level = sec_level_type::sec128;
+            std::size_t poly_modulus_degree = 0;  // 0: the smallest that fits
+            int special_modulus_count = 0;        // 0: as many as fit
+
+            HEParameterSet<Scheme::BFV> generate() const;
+            HEContext<Scheme::BFV> make_context() const;
         };
 
 Key Management Classes
@@ -166,6 +201,44 @@ Data and Cryptographic Classes
 
             // Key-switching and modulus management operations
             void relinearize_inplace(Ciphertext<scheme_type>& ctxt, const Relinkey<scheme_type>& rlk);
-            void rotate_rows_inplace(Ciphertext<scheme_type>& ctxt, int steps, const Galoiskey<scheme_type>& gk);
+            void rotate_inplace(Ciphertext<Scheme::CKKS>& ctxt, const Galoiskey<Scheme::CKKS>& gk, int steps);  // CKKS
+            void rotate_rows_inplace(Ciphertext<Scheme::BFV>& ctxt, const Galoiskey<Scheme::BFV>& gk, int steps);  // BFV, both rows
             void rescale_inplace(Ciphertext<Scheme::CKKS>& ctxt); // CKKS only
+        };
+
+**HESession and SessionCiphertext**
+    One party's computation in one object, see Sessions in the User Guide. ``SessionCiphertext`` has the operators ``+``, ``-``, ``*``, their compound assignments and unary ``-``, with other ciphertexts of the session, constants and vectors.
+
+    .. code-block:: cpp
+       :linenos:
+
+        template <Scheme scheme_type>
+        class HESession {
+        public:
+            explicit HESession(const HEParams<scheme_type>& params, const std::vector<int>& rotations = {});
+            explicit HESession(const HEParameterSet<scheme_type>& parameters, const std::vector<int>& rotations = {});
+
+            SessionCiphertext<scheme_type> encrypt(const std::vector<double>& values) const;  // CKKS; BFV: uint64_t, int64_t
+            std::vector<double> decrypt(const SessionCiphertext<scheme_type>& ctxt) const;   // CKKS; BFV: uint64_t
+            SessionCiphertext<scheme_type> wrap(Ciphertext<scheme_type> ctxt) const;
+            void add_rotations(const std::vector<int>& steps) const;
+
+            // CKKS: decrypt_complex, evaluate_polynomial, evaluate_chebyshev, scale, get_rescale_mode
+            // BFV: decrypt_signed, noise_budget, plain_modulus
+
+            // The objects of the lower level API.
+            HEContext<scheme_type> context() const;
+            Relinkey<scheme_type>& relin_key() const;
+            Galoiskey<scheme_type>& galois_key() const;
+            HEArithmeticOperator<scheme_type>& operators() const;
+            // ... secret_key, public_key, encoder, encryptor, decryptor
+        };
+
+        template <Scheme scheme_type>
+        class SessionCiphertext {
+        public:
+            Ciphertext<scheme_type>& ciphertext();
+            SessionCiphertext rotate(int steps) const;
+            SessionCiphertext conjugate() const;       // CKKS
+            SessionCiphertext rotate_columns() const;  // BFV
         };

@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -86,6 +87,7 @@ namespace heongpu
          * @return Data64* Pointer to the secret key data.
          */
         Data64* data();
+        const Data64* data() const;
 
         /**
          * @brief Switches the secretkey CUDA stream.
@@ -141,7 +143,7 @@ namespace heongpu
          */
         bool is_on_device() const noexcept
         {
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 return true;
             }
@@ -163,23 +165,24 @@ namespace heongpu
          * @param copy The source Secretkey object to copy from.
          */
         Secretkey(const Secretkey& copy)
-            : context_(copy.context_), scheme_(copy.scheme_),
-              ring_size_(copy.ring_size_),
+            : context_(copy.context_), context_id_(copy.context_id_),
+              scheme_(copy.scheme_), ring_size_(copy.ring_size_),
               coeff_modulus_count_(copy.coeff_modulus_count_),
-              n_power_(copy.n_power_), in_ntt_domain_(copy.in_ntt_domain_),
+              n_power_(copy.n_power_), hamming_weight_(copy.hamming_weight_),
+              in_ntt_domain_(copy.in_ntt_domain_),
               secret_key_generated_(copy.secret_key_generated_),
               storage_type_(copy.storage_type_)
         {
-            if (copy.storage_type_ == storage_type::DEVICE)
+            if (copy.storage_type_ == storage_type::device)
             {
                 device_locations_.resize(copy.device_locations_.size(),
                                          copy.device_locations_.stream());
-                cudaMemcpyAsync(device_locations_.data(),
-                                copy.device_locations_.data(),
-                                copy.device_locations_.size() * sizeof(Data64),
-                                cudaMemcpyDeviceToDevice,
-                                copy.device_locations_
-                                    .stream()); // TODO: use cudaStreamPerThread
+                HEONGPU_CUDA_CHECK(cudaMemcpyAsync(
+                    device_locations_.data(), copy.device_locations_.data(),
+                    copy.device_locations_.size() * sizeof(Data64),
+                    cudaMemcpyDeviceToDevice, copy.device_locations_.stream()));
+                HEONGPU_CUDA_CHECK(
+                    cudaStreamSynchronize(copy.device_locations_.stream()));
             }
             else
             {
@@ -201,6 +204,7 @@ namespace heongpu
          */
         Secretkey(Secretkey&& assign) noexcept
             : context_(std::move(assign.context_)),
+              context_id_(assign.context_id_),
               scheme_(std::move(assign.scheme_)),
               ring_size_(std::move(assign.ring_size_)),
               coeff_modulus_count_(std::move(assign.coeff_modulus_count_)),
@@ -212,6 +216,8 @@ namespace heongpu
               device_locations_(std::move(assign.device_locations_)),
               host_locations_(std::move(assign.host_locations_))
         {
+            assign.secret_key_generated_ = false;
+            assign.in_ntt_domain_ = false;
         }
 
         /**
@@ -229,35 +235,8 @@ namespace heongpu
         {
             if (this != &copy)
             {
-                context_ = copy.context_;
-                scheme_ = copy.scheme_;
-                ring_size_ = copy.ring_size_;
-                coeff_modulus_count_ = copy.coeff_modulus_count_;
-                n_power_ = copy.n_power_;
-
-                hamming_weight_ = copy.hamming_weight_;
-                in_ntt_domain_ = copy.in_ntt_domain_;
-                secret_key_generated_ = copy.secret_key_generated_;
-                storage_type_ = copy.storage_type_;
-
-                if (copy.storage_type_ == storage_type::DEVICE)
-                {
-                    device_locations_.resize(copy.device_locations_.size(),
-                                             copy.device_locations_.stream());
-                    cudaMemcpyAsync(
-                        device_locations_.data(), copy.device_locations_.data(),
-                        copy.device_locations_.size() * sizeof(Data64),
-                        cudaMemcpyDeviceToDevice,
-                        copy.device_locations_
-                            .stream()); // TODO: use cudaStreamPerThread
-                }
-                else
-                {
-                    host_locations_.resize(copy.host_locations_.size());
-                    std::memcpy(host_locations_.data(),
-                                copy.host_locations_.data(),
-                                copy.host_locations_.size() * sizeof(Data64));
-                }
+                Secretkey temporary(copy);
+                *this = std::move(temporary);
             }
             return *this;
         }
@@ -278,6 +257,7 @@ namespace heongpu
             if (this != &assign)
             {
                 context_ = std::move(assign.context_);
+                context_id_ = assign.context_id_;
                 scheme_ = std::move(assign.scheme_);
                 ring_size_ = std::move(assign.ring_size_);
                 coeff_modulus_count_ = std::move(assign.coeff_modulus_count_);
@@ -290,6 +270,8 @@ namespace heongpu
 
                 device_locations_ = std::move(assign.device_locations_);
                 host_locations_ = std::move(assign.host_locations_);
+                assign.secret_key_generated_ = false;
+                assign.in_ntt_domain_ = false;
             }
             return *this;
         }
@@ -302,32 +284,47 @@ namespace heongpu
          */
         Secretkey() = default;
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
+        // Generated keys cannot be rebound to different encryption parameters.
         void set_context(HEContext<Scheme::BFV> context)
         {
-            context_ = std::move(context);
+            if (secret_key_generated_)
+                validate_context(context);
+            else
+                *this = Secretkey(std::move(context));
         }
 
       private:
         HEContext<Scheme::BFV> context_;
-        scheme_type scheme_;
-        int ring_size_;
-        int coeff_modulus_count_;
-        int n_power_;
+        // Context identity read by load(); used when context_ is not set.
+        std::uint64_t context_id_ = 0;
 
-        int hamming_weight_;
-        bool in_ntt_domain_;
+        std::uint64_t serialized_context_id() const
+        {
+            return context_ ? context_->context_id() : context_id_;
+        }
+
+        scheme_type scheme_ = scheme_type::bfv;
+        int ring_size_ = 0;
+        int coeff_modulus_count_ = 0;
+        int n_power_ = 0;
+
+        int hamming_weight_ = 0;
+        bool in_ntt_domain_ = false;
         bool secret_key_generated_ = false;
 
-        storage_type storage_type_;
+        storage_type storage_type_ = storage_type::device;
 
         DeviceVector<Data64> device_locations_; // coefficients are RNS domain
         HostVector<Data64> host_locations_; // coefficients are RNS domain
 
-        int memory_size();
+        void validate_context(const HEContext<Scheme::BFV>& context) const;
+        void validate_key_data(const HEContext<Scheme::BFV>& context) const;
+        int memory_size() const;
         void memory_clear(cudaStream_t stream);
         void memory_set(DeviceVector<Data64>&& new_device_vector);
 

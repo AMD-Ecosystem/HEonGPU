@@ -1,8 +1,10 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
+#include <optional>
 #include <heongpu/host/bfv/operator.cuh>
 
 namespace heongpu
@@ -13,18 +15,25 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = std::move(context);
         encoding_location_ = encoder.encoding_location_;
     }
 
-    __host__ void HEOperator<Scheme::BFV>::add(Ciphertext<Scheme::BFV>& input1,
-                                               Ciphertext<Scheme::BFV>& input2,
-                                               Ciphertext<Scheme::BFV>& output,
-                                               const ExecutionOptions& options)
+    __host__ void
+    HEOperator<Scheme::BFV>::add(const Ciphertext<Scheme::BFV>& input1,
+                                 const Ciphertext<Scheme::BFV>& input2,
+                                 Ciphertext<Scheme::BFV>& output,
+                                 const ExecutionOptions& options)
     {
+        input1.validate_context(context_);
+        input2.validate_context(context_);
+
         if (input1.relinearization_required_ !=
             input2.relinearization_required_)
         {
@@ -45,7 +54,11 @@ namespace heongpu
             input2.memory_size() <
                 (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients per ciphertext, got ", input1.memory_size(),
+                " and ", input2.memory_size(), "."));
         }
 
         input_storage_manager(
@@ -75,6 +88,7 @@ namespace heongpu
                                 HEONGPU_CUDA_CHECK(cudaGetLastError());
 
                                 output_.scheme_ = context_->scheme_;
+                                output_.context_id_ = context_->context_id_;
                                 output_.ring_size_ = context_->n;
                                 output_.coeff_modulus_count_ = context_->Q_size;
                                 output_.cipher_size_ = cipher_size;
@@ -92,11 +106,15 @@ namespace heongpu
             options, (&input1 == &output));
     }
 
-    __host__ void HEOperator<Scheme::BFV>::sub(Ciphertext<Scheme::BFV>& input1,
-                                               Ciphertext<Scheme::BFV>& input2,
-                                               Ciphertext<Scheme::BFV>& output,
-                                               const ExecutionOptions& options)
+    __host__ void
+    HEOperator<Scheme::BFV>::sub(const Ciphertext<Scheme::BFV>& input1,
+                                 const Ciphertext<Scheme::BFV>& input2,
+                                 Ciphertext<Scheme::BFV>& output,
+                                 const ExecutionOptions& options)
     {
+        input1.validate_context(context_);
+        input2.validate_context(context_);
+
         if (input1.relinearization_required_ !=
             input2.relinearization_required_)
         {
@@ -117,7 +135,11 @@ namespace heongpu
             input2.memory_size() <
                 (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients per ciphertext, got ", input1.memory_size(),
+                " and ", input2.memory_size(), "."));
         }
 
         input_storage_manager(
@@ -148,6 +170,7 @@ namespace heongpu
                                 HEONGPU_CUDA_CHECK(cudaGetLastError());
 
                                 output_.scheme_ = context_->scheme_;
+                                output_.context_id_ = context_->context_id_;
                                 output_.ring_size_ = context_->n;
                                 output_.coeff_modulus_count_ = context_->Q_size;
                                 output_.cipher_size_ = cipher_size;
@@ -166,16 +189,21 @@ namespace heongpu
     }
 
     __host__ void
-    HEOperator<Scheme::BFV>::negate(Ciphertext<Scheme::BFV>& input1,
+    HEOperator<Scheme::BFV>::negate(const Ciphertext<Scheme::BFV>& input1,
                                     Ciphertext<Scheme::BFV>& output,
                                     const ExecutionOptions& options)
     {
+        input1.validate_context(context_);
+
         int cipher_size = input1.relinearization_required_ ? 3 : 2;
 
         if (input1.memory_size() <
             (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         input_storage_manager(
@@ -198,6 +226,7 @@ namespace heongpu
                         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
                         output_.scheme_ = context_->scheme_;
+                        output_.context_id_ = context_->context_id_;
                         output_.ring_size_ = context_->n;
                         output_.coeff_modulus_count_ = context_->Q_size;
                         output_.cipher_size_ = cipher_size;
@@ -222,12 +251,17 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < context_->n)
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(error_message(
+                "Invalid Plaintext size! Expected at least ", context_->n,
+                " coefficients, got ", input2.size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -256,12 +290,17 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < context_->n)
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(error_message(
+                "Invalid Plaintext size! Expected at least ", context_->n,
+                " coefficients, got ", input2.size(), "."));
         }
 
         addition_plain_bfv_poly_inplace<<<
@@ -282,12 +321,17 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < context_->n)
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(error_message(
+                "Invalid Plaintext size! Expected at least ", context_->n,
+                " coefficients, got ", input2.size(), "."));
         }
 
         DeviceVector<Data64> output_memory(
@@ -316,12 +360,17 @@ namespace heongpu
         if (input1.memory_size() <
             (cipher_size * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (cipher_size * context_->n * context_->Q_size),
+                " coefficients, got ", input1.memory_size(), "."));
         }
 
         if (input2.size() < context_->n)
         {
-            throw std::invalid_argument("Invalid Plaintext size!");
+            throw ParameterError(error_message(
+                "Invalid Plaintext size! Expected at least ", context_->n,
+                " coefficients, got ", input2.size(), "."));
         }
 
         substraction_plain_bfv_poly_inplace<<<
@@ -346,7 +395,11 @@ namespace heongpu
         if (input1.memory_size() < (2 * context_->n * context_->Q_size) ||
             input2.memory_size() < (2 * context_->n * context_->Q_size))
         {
-            throw std::invalid_argument("Invalid Ciphertexts size!");
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (2 * context_->n * context_->Q_size),
+                " coefficients per ciphertext, got ", input1.memory_size(),
+                " and ", input2.memory_size(), "."));
         }
 
         DeviceVector<Data64> output_memory((3 * context_->n * context_->Q_size),
@@ -502,10 +555,12 @@ namespace heongpu
         output.memory_set(std::move(output_memory));
     }
 
-    __host__ void HEOperator<Scheme::BFV>::relinearize_seal_method_inplace(
-        Ciphertext<Scheme::BFV>& input1, Relinkey<Scheme::BFV>& relin_key,
+    __host__ void HEOperator<Scheme::BFV>::relinearize_external_product_inplace(
+        Ciphertext<Scheme::BFV>& input1, const Relinkey<Scheme::BFV>& relin_key,
         const cudaStream_t stream)
     {
+        const int d = context_->d;
+
         DeviceVector<Data64> temp_relin(
             (context_->n * context_->Q_size * context_->Q_prime_size) +
                 (2 * context_->n * context_->Q_prime_size),
@@ -514,12 +569,9 @@ namespace heongpu
         Data64* temp2_relin = temp1_relin + (context_->n * context_->Q_size *
                                              context_->Q_prime_size);
 
-        cipher_broadcast_kernel<<<dim3((context_->n >> 8), context_->Q_size, 1),
-                                  256, 0, stream>>>(
-            input1.data() + (context_->Q_size << (context_->n_power + 1)),
-            temp1_relin, context_->modulus_->data(), context_->n_power,
-            context_->Q_prime_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        decompose_to_Qtilde(input1.data() +
+                                (context_->Q_size << (context_->n_power + 1)),
+                            temp1_relin, stream);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
             .n_power = context_->n_power,
@@ -531,13 +583,13 @@ namespace heongpu
 
         gpuntt::GPU_NTT_Inplace(temp1_relin, context_->ntt_table_->data(),
                                 context_->modulus_->data(), cfg_ntt,
-                                context_->Q_size * context_->Q_prime_size,
+                                d * context_->Q_prime_size,
                                 context_->Q_prime_size);
 
-        int iteration_count_1 = context_->Q_size / 4;
-        int iteration_count_2 = context_->Q_size % 4;
         // TODO: make it efficient
-        if (relin_key.storage_type_ == storage_type::DEVICE)
+        int iteration_count_1 = d / 4;
+        int iteration_count_2 = d % 4;
+        if (relin_key.storage_type_ == storage_type::device)
         {
             keyswitch_multiply_accumulate_kernel<<<
                 dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
@@ -573,119 +625,71 @@ namespace heongpu
                                  2 * context_->Q_prime_size,
                                  context_->Q_prime_size);
 
-        divide_round_lastq_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp2_relin, input1.data(), input1.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            context_->n_power, context_->Q_size);
+        if (context_->P_size == 1)
+        {
+            divide_round_lastq_kernel<<<dim3((context_->n >> 8),
+                                             context_->Q_size, 2),
+                                        256, 0, stream>>>(
+                temp2_relin, input1.data(), input1.data(),
+                context_->modulus_->data(), context_->half_p_->data(),
+                context_->half_mod_->data(), context_->last_q_modinv_->data(),
+                context_->n_power, context_->Q_size);
+        }
+        else
+        {
+            divide_round_lastq_extended_kernel<<<dim3((context_->n >> 8),
+                                                      context_->Q_size, 2),
+                                                 256, 0, stream>>>(
+                temp2_relin, input1.data(), input1.data(),
+                context_->modulus_->data(), context_->half_p_->data(),
+                context_->half_mod_->data(), context_->last_q_modinv_->data(),
+                context_->n_power, context_->Q_prime_size, context_->Q_size,
+                context_->P_size);
+        }
         HEONGPU_CUDA_CHECK(cudaGetLastError());
     }
 
     __host__ void
-    HEOperator<Scheme::BFV>::relinearize_external_product_method2_inplace(
-        Ciphertext<Scheme::BFV>& input1, Relinkey<Scheme::BFV>& relin_key,
-        const cudaStream_t stream)
+    HEOperator<Scheme::BFV>::decompose_to_Qtilde(Data64* input, Data64* output,
+                                                 cudaStream_t stream)
     {
-        const int d = context_->d;
+        if (context_->P_size == 1)
+        {
+            // Every digit is one prime.
+            single_prime_digits_to_Qtilde_kernel<<<
+                dim3((context_->n >> 8), context_->d, 1), 256, 0, stream>>>(
+                input, output, context_->modulus_->data(), context_->n_power,
+                context_->Q_prime_size, context_->Q_size, 0);
+            HEONGPU_CUDA_CHECK(cudaGetLastError());
+            return;
+        }
 
-        DeviceVector<Data64> temp_relin(
-            (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-        Data64* temp1_relin = temp_relin.data();
-        Data64* temp2_relin = temp1_relin + (context_->n * context_->Q_size *
-                                             context_->Q_prime_size);
-
-        base_conversion_DtoQtilde_relin_kernel<<<dim3((context_->n >> 8), d, 1),
-                                                 256, 0, stream>>>(
-            input1.data() + (context_->Q_size << (context_->n_power + 1)),
-            temp1_relin, context_->modulus_->data(),
+        base_conversion_DtoQtilde_relin_kernel<<<
+            dim3((context_->n >> 8), context_->d, 1), 256, 0, stream>>>(
+            input, output, context_->modulus_->data(),
             context_->base_change_matrix_D_to_Q_tilda_->data(),
             context_->Mi_inv_D_to_Q_tilda_->data(),
             context_->prod_D_to_Q_tilda_->data(), context_->I_j_->data(),
             context_->I_location_->data(), context_->n_power, context_->Q_size,
-            context_->Q_prime_size, d);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        gpuntt::GPU_NTT_Inplace(temp1_relin, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                d * context_->Q_prime_size,
-                                context_->Q_prime_size);
-
-        // TODO: make it efficient
-        int iteration_count_1 = d / 4;
-        int iteration_count_2 = d % 4;
-        if (relin_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_relin, relin_key.data(), temp2_relin,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(relin_key.host_location_, stream);
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_relin, key_location.data(), temp2_relin,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT_Inplace(temp2_relin, context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt,
-                                 2 * context_->Q_prime_size,
-                                 context_->Q_prime_size);
-
-        divide_round_lastq_extended_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp2_relin, input1.data(), input1.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            context_->n_power, context_->Q_prime_size, context_->Q_size,
-            context_->P_size);
+            context_->Q_prime_size, context_->d);
         HEONGPU_CUDA_CHECK(cudaGetLastError());
     }
 
-    __host__ void HEOperator<Scheme::BFV>::rotate_method_I(
+    __host__ void HEOperator<Scheme::BFV>::rotate_bfv(
         Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Galoiskey<Scheme::BFV>& galois_key, int shift,
+        const Galoiskey<Scheme::BFV>& galois_key, int shift,
         const cudaStream_t stream)
     {
         int galoiselt =
             steps_to_galois_elt(shift, context_->n, galois_key.group_order_);
-        bool key_exist = (galois_key.storage_type_ == storage_type::DEVICE)
+        bool key_exist = (galois_key.storage_type_ == storage_type::device)
                              ? (galois_key.device_location_.find(galoiselt) !=
                                 galois_key.device_location_.end())
                              : (galois_key.host_location_.find(galoiselt) !=
                                 galois_key.host_location_.end());
         if (key_exist)
         {
-            apply_galois_method_I(input1, output, galois_key, galoiselt,
-                                  stream);
+            apply_galois_bfv(input1, output, galois_key, galoiselt, stream);
         }
         else
         {
@@ -703,97 +707,121 @@ namespace heongpu
                 if (!(galois_key.galois_elt.find(index_in) !=
                       galois_key.galois_elt.end()))
                 {
-                    throw std::logic_error("Galois key not present!");
+                    throw KeyNotFoundError(error_message(
+                        "Galois key not present for rotation step ", index_in,
+                        " (needed for shift ", shift,
+                        ")! Generate the Galoiskey with this shift."));
                 }
-                galoiselt = galois_key.galois_elt[index_in];
+                galoiselt = galois_key.galois_elt.at(index_in);
                 required_galoiselt.push_back(galoiselt);
             }
 
             Ciphertext<Scheme::BFV>* current_input = &input1;
             for (auto& galois_elt : required_galoiselt)
             {
-                apply_galois_method_I(*current_input, output, galois_key,
-                                      galois_elt, stream);
+                apply_galois_bfv(*current_input, output, galois_key, galois_elt,
+                                 stream);
                 current_input = &output;
             }
         }
     }
 
-    __host__ void HEOperator<Scheme::BFV>::rotate_method_II(
-        Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Galoiskey<Scheme::BFV>& galois_key, int shift,
-        const cudaStream_t stream)
+    __host__ std::vector<Ciphertext<Scheme::BFV>>
+    HEOperator<Scheme::BFV>::rotate_rows_hoisted(
+        const Ciphertext<Scheme::BFV>& input1,
+        const Galoiskey<Scheme::BFV>& galois_key,
+        const std::vector<int>& shifts, const ExecutionOptions& options)
     {
-        int galoiselt =
-            steps_to_galois_elt(shift, context_->n, galois_key.group_order_);
-        bool key_exist = (galois_key.storage_type_ == storage_type::DEVICE)
-                             ? (galois_key.device_location_.find(galoiselt) !=
-                                galois_key.device_location_.end())
-                             : (galois_key.host_location_.find(galoiselt) !=
-                                galois_key.host_location_.end());
-        if (key_exist)
+        input1.validate_context(context_);
+        galois_key.validate_context(context_);
+
+        if (input1.relinearization_required_)
         {
-            apply_galois_method_II(input1, output, galois_key, galoiselt,
-                                   stream);
+            throw StateError("Ciphertext can not be rotated! "
+                             "Relinearize it first.");
         }
-        else
+
+        int current_decomp_count = context_->Q_size;
+
+        if (input1.memory_size() < (2 * context_->n * current_decomp_count))
         {
-            std::vector<int> required_galoiselt;
-            int shift_num = abs(shift);
-            int negative = (shift < 0) ? (-1) : 1;
-            while (shift_num != 0)
+            throw ParameterError(error_message(
+                "Invalid Ciphertexts size! Expected at least ",
+                (2 * context_->n * current_decomp_count), " coefficients, got ",
+                input1.memory_size(), "."));
+        }
+
+        auto has_key = [&](int galois_elt)
+        {
+            return (galois_key.storage_type_ == storage_type::device)
+                       ? (galois_key.device_location_.find(galois_elt) !=
+                          galois_key.device_location_.end())
+                       : (galois_key.host_location_.find(galois_elt) !=
+                          galois_key.host_location_.end());
+        };
+
+        std::vector<Ciphertext<Scheme::BFV>> results;
+        results.reserve(shifts.size());
+        input_storage_manager(
+            input1,
+            [&](Ciphertext<Scheme::BFV>& input1_)
             {
-                int power = int(log2(shift_num));
-                int power_2 = pow(2, power);
-                shift_num = shift_num - power_2;
-
-                int index_in = power_2 * negative;
-
-                if (!(galois_key.galois_elt.find(index_in) !=
-                      galois_key.galois_elt.end()))
+                std::optional<GaloisDecomposition> decomposition;
+                for (int shift : shifts)
                 {
-                    throw std::logic_error("Galois key not present!");
+                    Ciphertext<Scheme::BFV> output(context_, options);
+                    // Rotating by a multiple of the row size gives the input.
+                    shift %= (context_->n >> 1);
+                    int galois_elt =
+                        (shift == 0)
+                            ? 0
+                            : steps_to_galois_elt(shift, context_->n,
+                                                  galois_key.group_order_);
+                    if (shift == 0)
+                    {
+                        output = input1;
+                    }
+                    else if (has_key(galois_elt))
+                    {
+                        if (!decomposition)
+                        {
+                            decomposition =
+                                decompose_for_galois(input1_, options.stream_);
+                        }
+                        output_storage_manager(
+                            output,
+                            [&](Ciphertext<Scheme::BFV>& output_)
+                            {
+                                apply_galois_decomposed(
+                                    input1_, *decomposition, output_,
+                                    galois_key, galois_elt, options.stream_);
+                            },
+                            options);
+                    }
+                    else
+                    {
+                        rotate_rows(input1_, output, galois_key, shift,
+                                    options);
+                    }
+                    results.push_back(std::move(output));
                 }
-                galoiselt = galois_key.galois_elt[index_in];
-                required_galoiselt.push_back(galoiselt);
-            }
-
-            Ciphertext<Scheme::BFV>* current_input = &input1;
-            for (auto& galois_elt : required_galoiselt)
-            {
-                apply_galois_method_II(*current_input, output, galois_key,
-                                       galois_elt, stream);
-                current_input = &output;
-            }
-        }
+            },
+            options, false);
+        return results;
     }
 
-    __host__ void HEOperator<Scheme::BFV>::apply_galois_method_I(
-        Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
-        const cudaStream_t stream)
+    __host__ HEOperator<Scheme::BFV>::GaloisDecomposition
+    HEOperator<Scheme::BFV>::decompose_for_galois(
+        Ciphertext<Scheme::BFV>& input1, const cudaStream_t stream)
     {
-        DeviceVector<Data64> output_memory((2 * context_->n * context_->Q_size),
-                                           stream);
+        const int d = context_->d;
 
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
+        GaloisDecomposition decomposition{DeviceVector<Data64>(
+            context_->n * context_->Q_prime_size * d, stream)};
 
-        bfv_duplicate_kernel<<<dim3((context_->n >> 8), context_->Q_size, 2),
-                               256, 0, stream>>>(
-            input1.data(), temp0_rotation, temp1_rotation,
-            context_->modulus_->data(), context_->n_power,
-            context_->Q_prime_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        decompose_to_Qtilde(input1.data() +
+                                (context_->Q_size << context_->n_power),
+                            decomposition.digits.data(), stream);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
             .n_power = context_->n_power,
@@ -803,145 +831,52 @@ namespace heongpu
             .zero_padding = false,
             .stream = stream};
 
-        gpuntt::GPU_NTT_Inplace(temp1_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                context_->Q_size * context_->Q_prime_size,
-                                context_->Q_prime_size);
+        gpuntt::GPU_NTT_Inplace(
+            decomposition.digits.data(), context_->ntt_table_->data(),
+            context_->modulus_->data(), cfg_ntt, d * context_->Q_prime_size,
+            context_->Q_prime_size);
 
-        // MultSum
-        // TODO: make it efficient
-        int iteration_count_1 = context_->Q_size / 4;
-        int iteration_count_2 = context_->Q_size % 4;
-        if (galois_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(
-                temp1_rotation, galois_key.device_location_[galois_elt].data(),
-                temp2_rotation, context_->modulus_->data(), context_->n_power,
-                context_->Q_prime_size, iteration_count_1, iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(
-                galois_key.host_location_[galois_elt], stream);
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_rotation, key_location.data(), temp2_rotation,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT_Inplace(temp2_rotation, context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt,
-                                 2 * context_->Q_prime_size,
-                                 context_->Q_prime_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        // ModDown + Permute
-        divide_round_lastq_permute_bfv_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp2_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            galois_elt, context_->n_power, context_->Q_prime_size,
-            context_->Q_size, context_->P_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        output.memory_set(std::move(output_memory));
+        return decomposition;
     }
 
-    __host__ void HEOperator<Scheme::BFV>::apply_galois_method_II(
-        Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
+    __host__ void HEOperator<Scheme::BFV>::apply_galois_decomposed(
+        Ciphertext<Scheme::BFV>& input1, GaloisDecomposition& decomposition,
+        Ciphertext<Scheme::BFV>& output,
+        const Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
         const cudaStream_t stream)
     {
         const int d = context_->d;
 
         DeviceVector<Data64> output_memory((2 * context_->n * context_->Q_size),
                                            stream);
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size) +
-                (2 * context_->n * context_->Q_prime_size * d) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation + (context_->n * context_->Q_size);
-        Data64* temp3_rotation =
-            temp2_rotation + (2 * context_->n * context_->Q_prime_size * d);
-
-        // TODO: make it efficient
-        global_memory_replace_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 1), 256, 0, stream>>>(
-            input1.data(), temp0_rotation, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        base_conversion_DtoQtilde_relin_kernel<<<dim3((context_->n >> 8), d, 1),
-                                                 256, 0, stream>>>(
-            input1.data() + (context_->Q_size << context_->n_power),
-            temp2_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Q_tilda_->data(),
-            context_->Mi_inv_D_to_Q_tilda_->data(),
-            context_->prod_D_to_Q_tilda_->data(), context_->I_j_->data(),
-            context_->I_location_->data(), context_->n_power, context_->Q_size,
-            context_->Q_prime_size, d);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        gpuntt::GPU_NTT_Inplace(temp2_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                d * context_->Q_prime_size,
-                                context_->Q_prime_size);
+        DeviceVector<Data64> key_switched(
+            2 * context_->n * context_->Q_prime_size, stream);
 
         // MultSum
         // TODO: make it efficient
         int iteration_count_1 = d / 4;
         int iteration_count_2 = d % 4;
-        if (galois_key.storage_type_ == storage_type::DEVICE)
+        if (galois_key.storage_type_ == storage_type::device)
         {
             keyswitch_multiply_accumulate_kernel<<<
                 dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(
-                temp2_rotation, galois_key.device_location_[galois_elt].data(),
-                temp3_rotation, context_->modulus_->data(), context_->n_power,
-                context_->Q_prime_size, iteration_count_1, iteration_count_2);
+                stream>>>(decomposition.digits.data(),
+                          galois_key.device_location_.at(galois_elt).data(),
+                          key_switched.data(), context_->modulus_->data(),
+                          context_->n_power, context_->Q_prime_size,
+                          iteration_count_1, iteration_count_2);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
         else
         {
             DeviceVector<Data64> key_location(
-                galois_key.host_location_[galois_elt], stream);
+                galois_key.host_location_.at(galois_elt), stream);
             keyswitch_multiply_accumulate_kernel<<<
                 dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp2_rotation, key_location.data(), temp3_rotation,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
+                stream>>>(decomposition.digits.data(), key_location.data(),
+                          key_switched.data(), context_->modulus_->data(),
+                          context_->n_power, context_->Q_prime_size,
+                          iteration_count_1, iteration_count_2);
             HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
 
@@ -954,15 +889,16 @@ namespace heongpu
             .mod_inverse = context_->n_inverse_->data(),
             .stream = stream};
 
-        gpuntt::GPU_INTT_Inplace(temp3_rotation, context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt,
-                                 2 * context_->Q_prime_size,
-                                 context_->Q_prime_size);
+        gpuntt::GPU_INTT_Inplace(
+            key_switched.data(), context_->intt_table_->data(),
+            context_->modulus_->data(), cfg_intt, 2 * context_->Q_prime_size,
+            context_->Q_prime_size);
 
-        // ModDown + Permute
+        // ModDown + Permute; c0 is read from input1, which output replaces
+        // only afterwards.
         divide_round_lastq_permute_bfv_kernel<<<
             dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp3_rotation, temp0_rotation, output_memory.data(),
+            key_switched.data(), input1.data(), output_memory.data(),
             context_->modulus_->data(), context_->half_p_->data(),
             context_->half_mod_->data(), context_->last_q_modinv_->data(),
             galois_elt, context_->n_power, context_->Q_prime_size,
@@ -972,104 +908,20 @@ namespace heongpu
         output.memory_set(std::move(output_memory));
     }
 
-    __host__ void HEOperator<Scheme::BFV>::rotate_columns_method_I(
+    __host__ void HEOperator<Scheme::BFV>::apply_galois_bfv(
         Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Galoiskey<Scheme::BFV>& galois_key, const cudaStream_t stream)
+        const Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
+        const cudaStream_t stream)
     {
-        int galoiselt = galois_key.galois_elt_zero;
-
-        DeviceVector<Data64> output_memory((2 * context_->n * context_->Q_size),
-                                           stream);
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
-
-        bfv_duplicate_kernel<<<dim3((context_->n >> 8), context_->Q_size, 2),
-                               256, 0, stream>>>(
-            input1.data(), temp0_rotation, temp1_rotation,
-            context_->modulus_->data(), context_->n_power,
-            context_->Q_prime_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        gpuntt::GPU_NTT_Inplace(temp1_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                context_->Q_size * context_->Q_prime_size,
-                                context_->Q_prime_size);
-
-        // MultSum
-        // TODO: make it efficient
-        int iteration_count_1 = context_->Q_size / 4;
-        int iteration_count_2 = context_->Q_size % 4;
-        if (galois_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_rotation, galois_key.c_data(), temp2_rotation,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(galois_key.zero_host_location_,
-                                              stream);
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_rotation, key_location.data(), temp2_rotation,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT_Inplace(temp2_rotation, context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt,
-                                 2 * context_->Q_prime_size,
-                                 context_->Q_prime_size);
-
-        // ModDown + Permute
-        divide_round_lastq_permute_bfv_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp2_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            galoiselt, context_->n_power, context_->Q_prime_size,
-            context_->Q_size, context_->P_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        output.memory_set(std::move(output_memory));
+        GaloisDecomposition decomposition =
+            decompose_for_galois(input1, stream);
+        apply_galois_decomposed(input1, decomposition, output, galois_key,
+                                galois_elt, stream);
     }
 
-    __host__ void HEOperator<Scheme::BFV>::rotate_columns_method_II(
+    __host__ void HEOperator<Scheme::BFV>::rotate_columns_bfv(
         Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Galoiskey<Scheme::BFV>& galois_key, const cudaStream_t stream)
+        const Galoiskey<Scheme::BFV>& galois_key, const cudaStream_t stream)
     {
         const int d = context_->d;
 
@@ -1093,22 +945,12 @@ namespace heongpu
         Data64* temp3_rotation =
             temp2_rotation + (2 * context_->n * context_->Q_prime_size * d);
 
-        // TODO: make it efficient
-        global_memory_replace_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 1), 256, 0, stream>>>(
-            input1.data(), temp0_rotation, context_->n_power);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        // c0 is read from input1, which is replaced only at the end.
+        temp0_rotation = input1.data();
 
-        base_conversion_DtoQtilde_relin_kernel<<<dim3((context_->n >> 8), d, 1),
-                                                 256, 0, stream>>>(
-            input1.data() + (context_->Q_size << context_->n_power),
-            temp2_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Q_tilda_->data(),
-            context_->Mi_inv_D_to_Q_tilda_->data(),
-            context_->prod_D_to_Q_tilda_->data(), context_->I_j_->data(),
-            context_->I_location_->data(), context_->n_power, context_->Q_size,
-            context_->Q_prime_size, d);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        decompose_to_Qtilde(input1.data() +
+                                (context_->Q_size << context_->n_power),
+                            temp2_rotation, stream);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
             .n_power = context_->n_power,
@@ -1127,7 +969,7 @@ namespace heongpu
         // TODO: make it efficient
         int iteration_count_1 = d / 4;
         int iteration_count_2 = d % 4;
-        if (galois_key.storage_type_ == storage_type::DEVICE)
+        if (galois_key.storage_type_ == storage_type::device)
         {
             keyswitch_multiply_accumulate_kernel<<<
                 dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
@@ -1177,98 +1019,9 @@ namespace heongpu
         output.memory_set(std::move(output_memory));
     }
 
-    __host__ void HEOperator<Scheme::BFV>::switchkey_method_I(
+    __host__ void HEOperator<Scheme::BFV>::switchkey_bfv(
         Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Switchkey<Scheme::BFV>& switch_key, const cudaStream_t stream)
-    {
-        DeviceVector<Data64> output_memory((2 * context_->n * context_->Q_size),
-                                           stream);
-
-        DeviceVector<Data64> temp_rotation(
-            (2 * context_->n * context_->Q_size) +
-                (context_->n * context_->Q_size * context_->Q_prime_size) +
-                (2 * context_->n * context_->Q_prime_size),
-            stream);
-        Data64* temp0_rotation = temp_rotation.data();
-        Data64* temp1_rotation =
-            temp0_rotation + (2 * context_->n * context_->Q_size);
-        Data64* temp2_rotation =
-            temp1_rotation +
-            (context_->n * context_->Q_size * context_->Q_prime_size);
-
-        cipher_broadcast_switchkey_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            input1.data(), temp0_rotation, temp1_rotation,
-            context_->modulus_->data(), context_->n_power, context_->Q_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::FORWARD,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .stream = stream};
-
-        gpuntt::GPU_NTT_Inplace(temp1_rotation, context_->ntt_table_->data(),
-                                context_->modulus_->data(), cfg_ntt,
-                                context_->Q_size * context_->Q_prime_size,
-                                context_->Q_prime_size);
-
-        // TODO: make it efficient
-        int iteration_count_1 = context_->Q_size / 4;
-        int iteration_count_2 = context_->Q_size % 4;
-        if (switch_key.storage_type_ == storage_type::DEVICE)
-        {
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_rotation, switch_key.data(), temp2_rotation,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-        else
-        {
-            DeviceVector<Data64> key_location(switch_key.host_location_,
-                                              stream);
-            keyswitch_multiply_accumulate_kernel<<<
-                dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
-                stream>>>(temp1_rotation, key_location.data(), temp2_rotation,
-                          context_->modulus_->data(), context_->n_power,
-                          context_->Q_prime_size, iteration_count_1,
-                          iteration_count_2);
-            HEONGPU_CUDA_CHECK(cudaGetLastError());
-        }
-
-        gpuntt::ntt_rns_configuration<Data64> cfg_intt = {
-            .n_power = context_->n_power,
-            .ntt_type = gpuntt::INVERSE,
-            .ntt_layout = gpuntt::PerPolynomial,
-            .reduction_poly = gpuntt::ReductionPolynomial::X_N_plus,
-            .zero_padding = false,
-            .mod_inverse = context_->n_inverse_->data(),
-            .stream = stream};
-
-        gpuntt::GPU_INTT_Inplace(temp2_rotation, context_->intt_table_->data(),
-                                 context_->modulus_->data(), cfg_intt,
-                                 2 * context_->Q_prime_size,
-                                 context_->Q_prime_size);
-
-        divide_round_lastq_switchkey_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp2_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            context_->n_power, context_->Q_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
-
-        output.memory_set(std::move(output_memory));
-    }
-
-    __host__ void HEOperator<Scheme::BFV>::switchkey_method_II(
-        Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-        Switchkey<Scheme::BFV>& switch_key, const cudaStream_t stream)
+        const Switchkey<Scheme::BFV>& switch_key, const cudaStream_t stream)
     {
         const int d = context_->d;
 
@@ -1290,21 +1043,12 @@ namespace heongpu
         Data64* temp3_rotation =
             temp2_rotation + (2 * context_->n * context_->Q_prime_size * d);
 
-        cipher_broadcast_switchkey_method_II_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            input1.data(), temp0_rotation, temp1_rotation,
-            context_->modulus_->data(), context_->n_power, context_->Q_size);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        // c0 and c1 are read from input1, which is replaced only at the end.
+        temp0_rotation = input1.data();
+        temp1_rotation =
+            input1.data() + (context_->Q_size << context_->n_power);
 
-        base_conversion_DtoQtilde_relin_kernel<<<dim3((context_->n >> 8), d, 1),
-                                                 256, 0, stream>>>(
-            temp1_rotation, temp2_rotation, context_->modulus_->data(),
-            context_->base_change_matrix_D_to_Q_tilda_->data(),
-            context_->Mi_inv_D_to_Q_tilda_->data(),
-            context_->prod_D_to_Q_tilda_->data(), context_->I_j_->data(),
-            context_->I_location_->data(), context_->n_power, context_->Q_size,
-            context_->Q_prime_size, d);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        decompose_to_Qtilde(temp1_rotation, temp2_rotation, stream);
 
         gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
             .n_power = context_->n_power,
@@ -1322,7 +1066,7 @@ namespace heongpu
         // TODO: make it efficient
         int iteration_count_1 = d / 4;
         int iteration_count_2 = d % 4;
-        if (switch_key.storage_type_ == storage_type::DEVICE)
+        if (switch_key.storage_type_ == storage_type::device)
         {
             keyswitch_multiply_accumulate_kernel<<<
                 dim3((context_->n >> 8), context_->Q_prime_size, 1), 256, 0,
@@ -1359,13 +1103,27 @@ namespace heongpu
                                  2 * context_->Q_prime_size,
                                  context_->Q_prime_size);
 
-        divide_round_lastq_extended_switchkey_kernel<<<
-            dim3((context_->n >> 8), context_->Q_size, 2), 256, 0, stream>>>(
-            temp3_rotation, temp0_rotation, output_memory.data(),
-            context_->modulus_->data(), context_->half_p_->data(),
-            context_->half_mod_->data(), context_->last_q_modinv_->data(),
-            context_->n_power, context_->Q_prime_size, context_->Q_size,
-            context_->P_size);
+        if (context_->P_size == 1)
+        {
+            divide_round_lastq_switchkey_kernel<<<dim3((context_->n >> 8),
+                                                       context_->Q_size, 2),
+                                                  256, 0, stream>>>(
+                temp3_rotation, temp0_rotation, output_memory.data(),
+                context_->modulus_->data(), context_->half_p_->data(),
+                context_->half_mod_->data(), context_->last_q_modinv_->data(),
+                context_->n_power, context_->Q_size);
+        }
+        else
+        {
+            divide_round_lastq_extended_switchkey_kernel<<<
+                dim3((context_->n >> 8), context_->Q_size, 2), 256, 0,
+                stream>>>(temp3_rotation, temp0_rotation, output_memory.data(),
+                          context_->modulus_->data(), context_->half_p_->data(),
+                          context_->half_mod_->data(),
+                          context_->last_q_modinv_->data(), context_->n_power,
+                          context_->Q_prime_size, context_->Q_size,
+                          context_->P_size);
+        }
         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
         output.memory_set(std::move(output_memory));
@@ -1487,7 +1245,7 @@ namespace heongpu
 
     __host__ Ciphertext<Scheme::BFV>
     HEOperator<Scheme::BFV>::operator_from_ciphertext(
-        Ciphertext<Scheme::BFV>& input, cudaStream_t stream)
+        const Ciphertext<Scheme::BFV>& input, cudaStream_t stream)
     {
         Ciphertext<Scheme::BFV> cipher;
 
@@ -1496,9 +1254,10 @@ namespace heongpu
         cipher.ring_size_ = input.ring_size_;
 
         cipher.scheme_ = input.scheme_;
+        cipher.context_id_ = input.context_id_;
         cipher.in_ntt_domain_ = input.in_ntt_domain_;
 
-        cipher.storage_type_ = storage_type::DEVICE;
+        cipher.storage_type_ = storage_type::device;
 
         cipher.relinearization_required_ = input.relinearization_required_;
         cipher.ciphertext_generated_ = true;
@@ -1543,15 +1302,15 @@ namespace heongpu
     }
 
     __host__ void HELogicOperator<Scheme::BFV>::one_minus_cipher(
-        Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
+        const Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
         const ExecutionOptions& options)
     {
         // TODO: make it efficient
-        negate_inplace(input1, options);
+        negate(input1, output, options);
 
         addition_plain_bfv_poly<<<dim3((context_->n >> 8), context_->Q_size, 2),
                                   256, 0, options.stream_>>>(
-            input1.data(), encoded_constant_one_.data(), output.data(),
+            output.data(), encoded_constant_one_.data(), output.data(),
             context_->modulus_->data(), context_->plain_modulus_,
             context_->Q_mod_t_, context_->upper_threshold_,
             context_->coeeff_div_plainmod_->data(), context_->n_power);

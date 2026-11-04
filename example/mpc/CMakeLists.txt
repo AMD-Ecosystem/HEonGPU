@@ -1,4 +1,5 @@
 # Copyright 2024-2026 Alişah Özcan
+# Copyright 2026 enCRYPTON-Labs
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 # Developer: Alişah Özcan
@@ -39,7 +40,7 @@ function(add_example exe source)
         set_target_properties(${exe} PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
             POSITION_INDEPENDENT_CODE ON
-            CUDA_RUNTIME_LIBRARY Static
+            CUDA_RUNTIME_LIBRARY Shared
             CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
         )
     endif()

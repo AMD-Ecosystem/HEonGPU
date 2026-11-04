@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -19,6 +20,7 @@ namespace heongpu
         template <Scheme S> friend class HEArithmeticOperator;
         template <Scheme S> friend class HELogicOperator;
         template <Scheme S> friend class HEMultiPartyManager;
+        template <Scheme S> friend class HESession;
 
         template <typename T, typename F>
         friend void input_storage_manager(T& object, F function,
@@ -59,7 +61,7 @@ namespace heongpu
          */
         bool is_on_device() const noexcept
         {
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 return true;
             }
@@ -75,6 +77,7 @@ namespace heongpu
          * @return Data64* Pointer to the data.
          */
         Data64* data();
+        const Data64* data() const;
 
         /**
          * @brief Copies the data from the device to the host.
@@ -148,14 +151,17 @@ namespace heongpu
         inline int size() const noexcept { return cipher_size_; }
 
         /**
-         * @brief Returns the depth level of the ciphertext.
+         * @brief Returns the depth of the ciphertext: the number of primes
+         * dropped from Q by rescaling or mod_drop, 0 at the top level.
          *
-         * @return int Depth level of the ciphertext.
+         * @return int Depth of the ciphertext.
          */
         inline int depth() const noexcept { return depth_; }
 
         /**
-         * @brief Returns the level of the ciphertext.
+         * @brief Returns the level of the ciphertext: the number of
+         * rescalings left, L - depth() for the L scaling primes of Q, 0 when
+         * only the first prime is left.
          *
          * @return int Level of the ciphertext.
          */
@@ -207,6 +213,12 @@ namespace heongpu
             return relinearization_required_;
         }
 
+        /**
+         * @brief Returns a one line description, for example for logs and
+         * error reports. Also written by operator<<.
+         */
+        std::string to_string() const;
+
         Ciphertext() = default;
 
         Ciphertext(const Ciphertext& copy)
@@ -218,10 +230,11 @@ namespace heongpu
               encoding_(copy.encoding_),
               rescale_required_(copy.rescale_required_),
               relinearization_required_(copy.relinearization_required_),
-              ciphertext_generated_(copy.ciphertext_generated_)
+              ciphertext_generated_(copy.ciphertext_generated_),
+              context_id_(copy.context_id_)
 
         {
-            if (copy.storage_type_ == storage_type::DEVICE)
+            if (copy.storage_type_ == storage_type::device)
             {
                 device_locations_.resize(copy.device_locations_.size(),
                                          copy.device_locations_.stream());
@@ -254,9 +267,11 @@ namespace heongpu
               relinearization_required_(
                   std::move(assign.relinearization_required_)),
               ciphertext_generated_(std::move(assign.ciphertext_generated_)),
+              context_id_(assign.context_id_),
               device_locations_(std::move(assign.device_locations_)),
               host_locations_(std::move(assign.host_locations_))
         {
+            assign.ciphertext_generated_ = false;
         }
 
         Ciphertext& operator=(const Ciphertext& copy)
@@ -276,8 +291,9 @@ namespace heongpu
                 rescale_required_ = copy.rescale_required_;
                 relinearization_required_ = copy.relinearization_required_;
                 ciphertext_generated_ = copy.ciphertext_generated_;
+                context_id_ = copy.context_id_;
 
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     device_locations_.resize(copy.device_locations_.size(),
                                              copy.device_locations_.stream());
@@ -317,38 +333,50 @@ namespace heongpu
                 relinearization_required_ =
                     std::move(assign.relinearization_required_);
                 ciphertext_generated_ = std::move(assign.ciphertext_generated_);
+                context_id_ = assign.context_id_;
 
                 device_locations_ = std::move(assign.device_locations_);
                 host_locations_ = std::move(assign.host_locations_);
+                assign.ciphertext_generated_ = false;
             }
             return *this;
         }
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
+        /**
+         * @brief Loads a ciphertext after validating its binary representation.
+         * Existing ring/modulus dimensions must match; failed loads leave the
+         * object unchanged. Default-constructed objects are checked against the
+         * execution context before GPU operations.
+         */
         void load(std::istream& is);
 
       private:
-        scheme_type scheme_;
-        int ring_size_;
-        int coeff_modulus_count_;
-        int cipher_size_;
-        int depth_;
+        scheme_type scheme_ = scheme_type::ckks;
+        int ring_size_ = 0;
+        int coeff_modulus_count_ = 0;
+        int cipher_size_ = 0;
+        int depth_ = 0;
 
-        bool in_ntt_domain_;
-        storage_type storage_type_;
+        bool in_ntt_domain_ = true;
+        storage_type storage_type_ = storage_type::device;
 
-        double scale_;
-        encoding encoding_ = encoding::SLOT;
-        bool rescale_required_;
-        bool relinearization_required_;
+        double scale_ = 0;
+        encoding encoding_ = encoding::slot;
+        bool rescale_required_ = false;
+        bool relinearization_required_ = false;
 
         bool ciphertext_generated_ = false;
+        std::uint64_t context_id_ = 0;
 
         DeviceVector<Data64> device_locations_;
         HostVector<Data64> host_locations_;
 
-        int memory_size();
+        size_t checked_memory_size() const;
+        void validate_context(const HEContext<Scheme::CKKS>& context) const;
+        int memory_size() const;
         void memory_clear(cudaStream_t stream);
         void memory_set(DeviceVector<Data64>&& new_device_vector);
 
@@ -356,6 +384,9 @@ namespace heongpu
         void remove_from_device(cudaStream_t stream);
         void remove_from_host();
     };
+
+    std::ostream& operator<<(std::ostream& os,
+                             const Ciphertext<Scheme::CKKS>& object);
 
 } // namespace heongpu
 #endif // HEONGPU_CKKS_CIPHERTEXT_H

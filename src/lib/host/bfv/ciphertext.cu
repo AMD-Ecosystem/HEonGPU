@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -13,10 +14,14 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         scheme_ = context->scheme_;
+        context_id_ = context->context_id_;
         coeff_modulus_count_ = context->Q_size;
         cipher_size_ = 2;
         ring_size_ = context->n;
@@ -33,7 +38,7 @@ namespace heongpu
 
         storage_type_ = options.storage_;
 
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             device_locations_ =
                 DeviceVector<Data64>(cipher_memory_size, options.stream_);
@@ -46,7 +51,7 @@ namespace heongpu
 
     void Ciphertext<Scheme::BFV>::store_in_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -64,13 +69,13 @@ namespace heongpu
                 host_locations_.shrink_to_fit();
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Ciphertext<Scheme::BFV>::store_in_host(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             if (memory_size() == 0)
             {
@@ -91,7 +96,7 @@ namespace heongpu
                 device_locations_.shrink_to_fit(stream);
             }
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -101,7 +106,19 @@ namespace heongpu
 
     Data64* Ciphertext<Scheme::BFV>::data()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
+        {
+            return device_locations_.data();
+        }
+        else
+        {
+            return host_locations_.data();
+        }
+    }
+
+    const Data64* Ciphertext<Scheme::BFV>::data() const
+    {
+        if (storage_type_ == storage_type::device)
         {
             return device_locations_.data();
         }
@@ -122,7 +139,7 @@ namespace heongpu
             cipher.resize(cipher_memory_size);
         }
 
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             cudaMemcpyAsync(cipher.data(), device_locations_.data(),
                             cipher_memory_size * sizeof(Data64),
@@ -148,7 +165,7 @@ namespace heongpu
             cipher.resize(cipher_memory_size);
         }
 
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             cudaMemcpyAsync(cipher.data(), device_locations_.data(),
                             cipher_memory_size * sizeof(Data64),
@@ -163,15 +180,23 @@ namespace heongpu
         }
     }
 
-    void Ciphertext<Scheme::BFV>::save(std::ostream& os) const
+    void Ciphertext<Scheme::BFV>::save(std::ostream& os,
+                                       serialization_format format) const
     {
         if (ciphertext_generated_)
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::ciphertext, scheme_,
+                context_id_);
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
             if (scheme_ != scheme_type::bfv)
             {
-                throw std::runtime_error("Invalid scheme binary!");
+                throw SerializationError(
+                    error_message("Invalid scheme binary! Expected BFV data, "
+                                  "found scheme id ",
+                                  static_cast<int>(scheme_), "."));
             }
 
             os.write((char*) &ring_size_, sizeof(ring_size_));
@@ -191,7 +216,7 @@ namespace heongpu
             os.write((char*) &ciphertext_generated_,
                      sizeof(ciphertext_generated_));
 
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 uint32_t ciphertext_memory_size =
                     cipher_size_ * coeff_modulus_count_ * ring_size_;
@@ -227,6 +252,17 @@ namespace heongpu
     {
         if ((!ciphertext_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::ciphertext,
+                    scheme_type::bfv);
+            detail::validate_loaded_context_identity(
+                context_id_, loaded_context_id, "Ciphertext");
+            if (loaded_context_id != 0)
+            {
+                context_id_ = loaded_context_id;
+            }
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
             is.read((char*) &ring_size_, sizeof(ring_size_));
@@ -246,7 +282,7 @@ namespace heongpu
             is.read((char*) &ciphertext_generated_,
                     sizeof(ciphertext_generated_));
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
             ciphertext_generated_ = true;
 
             uint32_t ciphertext_memory_size;
@@ -276,9 +312,15 @@ namespace heongpu
         }
     }
 
-    int Ciphertext<Scheme::BFV>::memory_size()
+    void Ciphertext<Scheme::BFV>::validate_context(
+        const HEContext<Scheme::BFV>& context) const
     {
-        if (storage_type_ == storage_type::DEVICE)
+        validate_context_identity(context_id_, context, "Ciphertext");
+    }
+
+    int Ciphertext<Scheme::BFV>::memory_size() const
+    {
+        if (storage_type_ == storage_type::device)
         {
             return device_locations_.size();
         }
@@ -306,7 +348,7 @@ namespace heongpu
     void Ciphertext<Scheme::BFV>::memory_set(
         DeviceVector<Data64>&& new_device_vector)
     {
-        storage_type_ = storage_type::DEVICE;
+        storage_type_ = storage_type::device;
         device_locations_ = std::move(new_device_vector);
 
         if (host_locations_.size() > 0)
@@ -318,7 +360,7 @@ namespace heongpu
 
     void Ciphertext<Scheme::BFV>::copy_to_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -334,18 +376,18 @@ namespace heongpu
                     DeviceVector<Data64>(host_locations_, stream);
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Ciphertext<Scheme::BFV>::remove_from_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             device_locations_.resize(0, stream);
             device_locations_.shrink_to_fit(stream);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -355,7 +397,7 @@ namespace heongpu
 
     void Ciphertext<Scheme::BFV>::remove_from_host()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -364,8 +406,34 @@ namespace heongpu
             host_locations_.resize(0);
             host_locations_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
+    }
+
+    std::string Ciphertext<Scheme::BFV>::to_string() const
+    {
+        if (!ciphertext_generated_)
+        {
+            return "Ciphertext<BFV>(not generated)";
+        }
+        std::ostringstream stream;
+        stream << "Ciphertext<BFV>(N=" << ring_size_
+               << ", size=" << cipher_size_
+               << ", moduli=" << coeff_modulus_count_ << ", "
+               << (in_ntt_domain_ ? "NTT" : "coefficient") << " domain, "
+               << detail::name(storage_type_);
+        if (relinearization_required_)
+        {
+            stream << ", relinearization required";
+        }
+        stream << ")";
+        return stream.str();
+    }
+
+    std::ostream& operator<<(std::ostream& os,
+                             const Ciphertext<Scheme::BFV>& object)
+    {
+        return os << object.to_string();
     }
 
 } // namespace heongpu

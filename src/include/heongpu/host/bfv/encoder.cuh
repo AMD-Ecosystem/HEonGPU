@@ -66,10 +66,11 @@ namespace heongpu
                 {
                     encode_bfv(plain_, message, options.stream_);
 
-                    plain.plain_size_ = context_->n;
-                    plain.scheme_ = context_->scheme_;
-                    plain.in_ntt_domain_ = false;
-                    plain.plaintext_generated_ = true;
+                    plain_.plain_size_ = context_->n;
+                    plain_.scheme_ = context_->scheme_;
+                    plain_.context_id_ = context_->context_id_;
+                    plain_.in_ntt_domain_ = false;
+                    plain_.plaintext_generated_ = true;
                 },
                 options);
         }
@@ -99,10 +100,11 @@ namespace heongpu
                 {
                     encode_bfv(plain_, message, options.stream_);
 
-                    plain.plain_size_ = context_->n;
-                    plain.scheme_ = context_->scheme_;
-                    plain.in_ntt_domain_ = false;
-                    plain.plaintext_generated_ = true;
+                    plain_.plain_size_ = context_->n;
+                    plain_.scheme_ = context_->scheme_;
+                    plain_.context_id_ = context_->context_id_;
+                    plain_.in_ntt_domain_ = false;
+                    plain_.plaintext_generated_ = true;
                 },
                 options);
         }
@@ -132,10 +134,11 @@ namespace heongpu
                 {
                     encode_bfv(plain_, message, options.stream_);
 
-                    plain.plain_size_ = context_->n;
-                    plain.scheme_ = context_->scheme_;
-                    plain.in_ntt_domain_ = false;
-                    plain.plaintext_generated_ = true;
+                    plain_.plain_size_ = context_->n;
+                    plain_.scheme_ = context_->scheme_;
+                    plain_.context_id_ = context_->context_id_;
+                    plain_.in_ntt_domain_ = false;
+                    plain_.plaintext_generated_ = true;
                 },
                 options);
         }
@@ -165,10 +168,11 @@ namespace heongpu
                 {
                     encode_bfv(plain_, message, options.stream_);
 
-                    plain.plain_size_ = context_->n;
-                    plain.scheme_ = context_->scheme_;
-                    plain.in_ntt_domain_ = false;
-                    plain.plaintext_generated_ = true;
+                    plain_.plain_size_ = context_->n;
+                    plain_.scheme_ = context_->scheme_;
+                    plain_.context_id_ = context_->context_id_;
+                    plain_.in_ntt_domain_ = false;
+                    plain_.plaintext_generated_ = true;
                 },
                 options);
         }
@@ -180,9 +184,12 @@ namespace heongpu
          * @param plain Plaintext object to be decoded.
          */
         __host__ void
-        decode(std::vector<uint64_t>& message, Plaintext<Scheme::BFV>& plain,
+        decode(std::vector<uint64_t>& message,
+               const Plaintext<Scheme::BFV>& plain,
                const ExecutionOptions& options = ExecutionOptions())
         {
+            plain.validate_context(context_);
+
             input_storage_manager(
                 plain,
                 [&](Plaintext<Scheme::BFV>& plain_)
@@ -197,9 +204,12 @@ namespace heongpu
          * @param plain Plaintext object to be decoded.
          */
         __host__ void
-        decode(std::vector<int64_t>& message, Plaintext<Scheme::BFV>& plain,
+        decode(std::vector<int64_t>& message,
+               const Plaintext<Scheme::BFV>& plain,
                const ExecutionOptions& options = ExecutionOptions())
         {
+            plain.validate_context(context_);
+
             input_storage_manager(
                 plain,
                 [&](Plaintext<Scheme::BFV>& plain_)
@@ -217,9 +227,12 @@ namespace heongpu
          * @param plain Plaintext object to be decoded.
          */
         __host__ void
-        decode(HostVector<uint64_t>& message, Plaintext<Scheme::BFV>& plain,
+        decode(HostVector<uint64_t>& message,
+               const Plaintext<Scheme::BFV>& plain,
                const ExecutionOptions& options = ExecutionOptions())
         {
+            plain.validate_context(context_);
+
             input_storage_manager(
                 plain,
                 [&](Plaintext<Scheme::BFV>& plain_)
@@ -235,12 +248,15 @@ namespace heongpu
          * @param plain Plaintext object to be decoded.
          */
         __host__ void
-        decode(HostVector<int64_t>& message, Plaintext<Scheme::BFV>& plain,
+        decode(HostVector<int64_t>& message,
+               const Plaintext<Scheme::BFV>& plain,
                const ExecutionOptions& options = ExecutionOptions())
         {
+            plain.validate_context(context_);
+
             input_storage_manager(
                 plain,
-                [&](Plaintext<Scheme::BFV> plain_)
+                [&](Plaintext<Scheme::BFV>& plain_)
                 { decode_bfv(message, plain_, options.stream_); },
                 options, false);
         }
@@ -260,6 +276,48 @@ namespace heongpu
         HEEncoder(HEEncoder&& source) = default;
         HEEncoder& operator=(const HEEncoder& assign) = default;
         HEEncoder& operator=(HEEncoder&& assign) = default;
+
+        // Value-returning versions of the functions above. They give the
+        // same results.
+
+        /**
+         * @brief Returns message encoded into a new plaintext; see
+         * encode(plain, message).
+         */
+        __host__ Plaintext<Scheme::BFV>
+        encode(const std::vector<uint64_t>& message,
+               const ExecutionOptions& options = ExecutionOptions())
+        {
+            Plaintext<Scheme::BFV> output(context_, options);
+            encode(output, message, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns message encoded into a new plaintext; see
+         * encode(plain, message).
+         */
+        __host__ Plaintext<Scheme::BFV>
+        encode(const std::vector<int64_t>& message,
+               const ExecutionOptions& options = ExecutionOptions())
+        {
+            Plaintext<Scheme::BFV> output(context_, options);
+            encode(output, message, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns the values decoded from plain; see decode(message,
+         * plain).
+         */
+        __host__ std::vector<uint64_t>
+        decode(const Plaintext<Scheme::BFV>& plain,
+               const ExecutionOptions& options = ExecutionOptions())
+        {
+            std::vector<uint64_t> message;
+            decode(message, plain, options);
+            return message;
+        }
 
       private:
         __host__ void encode_bfv(Plaintext<Scheme::BFV>& plain,

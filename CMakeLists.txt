@@ -1,16 +1,36 @@
 # Copyright 2024-2026 Alişah Özcan
+# Copyright 2026 enCRYPTON-Labs
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 # Developer: Alişah Özcan
 
-cmake_minimum_required(VERSION 3.26.4 FATAL_ERROR)
+cmake_minimum_required(VERSION 4.0 FATAL_ERROR)
 
 option(USE_HIP "Build with HIP for AMD GPUs" OFF)
 
-if(USE_HIP)
-    project(HEonGPU VERSION 1.1 LANGUAGES C CXX HIP ASM)
+# Whether the CUDA architectures are given. Otherwise project() sets
+# CMAKE_CUDA_ARCHITECTURES to the default of nvcc (52 for CUDA 12, 75 for
+# CUDA 13), and HEonGPU detects the architecture of the GPU instead.
+if(DEFINED CMAKE_CUDA_ARCHITECTURES OR DEFINED ENV{CUDAARCHS})
+    set(HEONGPU_CUDA_ARCH_GIVEN ON)
 else()
-    project(HEonGPU VERSION 1.1 LANGUAGES C CXX CUDA ASM)
+    set(HEONGPU_CUDA_ARCH_GIVEN OFF)
+endif()
+
+if(USE_HIP)
+    project(HEonGPU VERSION 2.1.1 LANGUAGES C CXX HIP ASM)
+else()
+    project(HEonGPU VERSION 2.1.1 LANGUAGES C CXX CUDA ASM)
+
+    # The CCCL version that RMM 26.08 needs makes older nvcc versions crash
+    # (tested: 12.4 and 12.6 fail, 12.8 and 13.x work).
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8)
+        message(FATAL_ERROR
+            "HEonGPU needs CUDA 12.8 or newer, found CUDA "
+            "${CMAKE_CUDA_COMPILER_VERSION} (${CMAKE_CUDA_COMPILER}). Select a "
+            "newer CUDA Toolkit, for example with -D CMAKE_CUDA_COMPILER=<path to "
+            "nvcc>.")
+    endif()
 endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -25,12 +45,12 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 set(BINARY_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/bin)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_LIST_DIR}/cmake)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 message(STATUS "C++ Standard is: ${CMAKE_CXX_STANDARD}")
 
 if(USE_HIP)
-    set(CMAKE_HIP_STANDARD 17)
+    set(CMAKE_HIP_STANDARD 20)
     set(CMAKE_HIP_STANDARD_REQUIRED ON)
     message(STATUS "HIP Standard: ${CMAKE_HIP_STANDARD}")
 
@@ -55,7 +75,7 @@ if(USE_HIP)
     # rocThrust is a drop-in for Thrust on HIP
     find_package(rocthrust REQUIRED)
 else()
-    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     message(STATUS "CUDA Standard: ${CMAKE_CUDA_STANDARD}")
 
@@ -69,7 +89,7 @@ else()
 endif()
 find_package(OpenMP REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
+find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto SSL)
 
 if(USE_HIP)
     message(STATUS "Building with HIP for ROCm")
@@ -89,15 +109,23 @@ endif()
 if(NOT USE_HIP)
     set(HEONGPU_CUDA_ARCH_AUTO_DETECTED OFF CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch")
     set(HEONGPU_CUDA_ARCH_FORCE_MANUAL OFF CACHE BOOL "Set to ON to prevent HEonGPU from auto-detecting CUDA arch")
-    if(NOT HEONGPU_CUDA_ARCH_FORCE_MANUAL AND (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "native" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52" OR HEONGPU_CUDA_ARCH_AUTO_DETECTED))
+    # A reconfigure detects again unless CMAKE_CUDA_ARCHITECTURES was changed
+    # from the detected value.
+    if(HEONGPU_CUDA_ARCH_AUTO_DETECTED AND
+       (CMAKE_CUDA_ARCHITECTURES STREQUAL HEONGPU_CUDA_ARCH_DETECTED_VALUE))
+        set(HEONGPU_CUDA_ARCH_GIVEN OFF)
+    endif()
+    if(NOT HEONGPU_CUDA_ARCH_FORCE_MANUAL AND (NOT HEONGPU_CUDA_ARCH_GIVEN OR CMAKE_CUDA_ARCHITECTURES STREQUAL "" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "native" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52"))
         include(cmake/DetectCudaArch.cmake)
         heongpu_detect_cuda_arch(HEONGPU_DETECTED_CUDA_ARCH)
         if(HEONGPU_DETECTED_CUDA_ARCH)
             set(CMAKE_CUDA_ARCHITECTURES "${HEONGPU_DETECTED_CUDA_ARCH}" CACHE STRING "CUDA GPU architectures" FORCE)
+            set(HEONGPU_CUDA_ARCH_DETECTED_VALUE "${HEONGPU_DETECTED_CUDA_ARCH}" CACHE INTERNAL "CUDA architecture HEonGPU detected")
             set(HEONGPU_CUDA_ARCH_AUTO_DETECTED ON CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch" FORCE)
             message(STATUS "Auto-detected CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} for HEonGPU")
         else()
             set(CMAKE_CUDA_ARCHITECTURES native CACHE STRING "CUDA GPU architectures" FORCE)
+            set(HEONGPU_CUDA_ARCH_DETECTED_VALUE native CACHE INTERNAL "CUDA architecture HEonGPU detected")
             set(HEONGPU_CUDA_ARCH_AUTO_DETECTED ON CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch" FORCE)
             message(WARNING "CUDA arch auto-detection failed; falling back to CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
         endif()
@@ -111,19 +139,23 @@ endif()
 # Export Library #
 ##################
 
-set(RUNTIME_DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
-set(LIBRARY_DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
-set(ARCHIVE_DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
-set(INCLUDES_DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
-set(INCLUDES_INSTALL_DIR ${INCLUDES_DESTINATION}/HEonGPU-${PROJECT_VERSION})
+# Destinations are relative to the install prefix, so that
+# `cmake --install --prefix` works and the installed package can be moved.
+include(GNUInstallDirs)
+set(RUNTIME_DESTINATION ${CMAKE_INSTALL_BINDIR})
+set(LIBRARY_DESTINATION ${CMAKE_INSTALL_LIBDIR})
+set(ARCHIVE_DESTINATION ${CMAKE_INSTALL_LIBDIR})
+set(INCLUDES_DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+set(HEonGPU_INSTALL_VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
+set(INCLUDES_INSTALL_DIR ${INCLUDES_DESTINATION}/HEonGPU-${HEonGPU_INSTALL_VERSION})
 
 set(HEonGPU_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(HEonGPU_VERSION_CONFIG "${HEonGPU_GENERATED_DIR}/${PROJECT_NAME}ConfigVersion.cmake")
 set(HEonGPU_PROJECT_CONFIG "${HEonGPU_GENERATED_DIR}/${PROJECT_NAME}Config.cmake")
 set(HEonGPU_TARGETS_EXPORT_NAME "${PROJECT_NAME}Targets")
-set(HEonGPU_CONFIG_INSTALL_DIR "lib/cmake/${PROJECT_NAME}-${PROJECT_VERSION}")
+set(HEonGPU_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}-${HEonGPU_INSTALL_VERSION}")
 set(HEonGPU_NAMESPACE "${PROJECT_NAME}::")
-set(HEonGPU_VERSION 1.1)
+set(HEonGPU_VERSION ${PROJECT_VERSION})
 
 include(CMakePackageConfigHelpers)
 write_basic_package_version_file(

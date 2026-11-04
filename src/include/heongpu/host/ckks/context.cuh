@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -58,9 +59,72 @@ namespace heongpu
         void generate();
         void generate(const MemoryPoolConfig& pool_config);
 
-        void print_parameters();
+        /**
+         * @brief Selects how ciphertexts are rescaled, after the moduli are
+         * set. rescale_mode::manual, the default, leaves rescaling and
+         * bringing operands to the same level to the application.
+         *
+         * With rescale_mode::automatic, every level l has one scale s_l:
+         * s_L = scale at the top level and s_{l-1} = s_l^2 / q_l, where q_l is
+         * the prime that rescaling drops at level l. Multiplying two
+         * ciphertexts of level l and rescaling gives exactly s_{l-1}, so
+         * ciphertexts encoded with the scales of their levels keep them. The
+         * operators then rescale before the operations that need it and bring
+         * operands at different levels to the same level and scale; see
+         * HEArithmeticOperator<Scheme::CKKS>. HEParams<Scheme::CKKS> chooses
+         * primes that keep every s_l next to scale.
+         *
+         * top_level, the top level by default, is the level L of scale; the
+         * levels above it have no scale. A context for bootstrapping sets it
+         * to the level of the bootstrapping results, which have scale: the
+         * levels above are those the bootstrapping uses. Operations in
+         * rescale_mode::automatic throw LevelMismatchError for operands above
+         * top_level.
+         *
+         * The mode is not part of the identity of the context and is not
+         * saved with it: keys and ciphertexts are the same in both modes. Set
+         * it again after load().
+         */
+        void set_rescale_mode(rescale_mode mode, double scale = 0.0,
+                              int top_level = -1);
+
+        inline rescale_mode get_rescale_mode() const noexcept
+        {
+            return rescale_mode_;
+        }
+
+        /**
+         * @brief Returns the scale of level in rescale_mode::automatic, see
+         * set_rescale_mode. Throws LevelMismatchError for a level above the
+         * top level.
+         */
+        double get_level_scale(int level) const;
+
+        /**
+         * @brief Returns the top level of rescale_mode::automatic, the level
+         * of the scale given to set_rescale_mode; the top level of the
+         * context in rescale_mode::manual.
+         */
+        int get_top_level() const noexcept;
+
+        /**
+         * @brief Writes the encryption parameters to os, std::cout by
+         * default.
+         */
+        void print_parameters(std::ostream& os = std::cout) const;
+
+        /**
+         * @brief Returns a one line description, for example for logs and
+         * error reports. Also written by operator<<.
+         */
+        std::string to_string() const;
 
         inline int get_poly_modulus_degree() const noexcept { return n; }
+
+        inline sec_level_type get_security_level() const noexcept
+        {
+            return sec_level_;
+        }
 
         inline int get_log_poly_modulus_degree() const noexcept
         {
@@ -82,7 +146,17 @@ namespace heongpu
             return prime_vector_;
         }
 
-        void save(std::ostream& os) const;
+        /**
+         * @brief Returns the identity of the context, computed in generate()
+         * from the parameters the objects of the context depend on. Contexts
+         * generated from the same parameters have the same identity, and
+         * objects can only be used with a context that has the identity of
+         * the context they were created with. Returns 0 before generate().
+         */
+        inline std::uint64_t context_id() const noexcept { return context_id_; }
+
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -90,10 +164,17 @@ namespace heongpu
         bool poly_modulus_degree_specified_ = false;
         bool coeff_modulus_specified_ = false;
         bool context_generated_ = false;
+        std::uint64_t context_id_ = 0;
+
+        rescale_mode rescale_mode_ = rescale_mode::manual;
+        // The scale of every level in rescale_mode::automatic, indexed by
+        // level; 0 above top_level_.
+        std::vector<double> level_scales_;
+        // The top level of rescale_mode::automatic.
+        int top_level_ = 0;
 
         scheme_type scheme_;
         sec_level_type sec_level_;
-        keyswitching_type keyswitching_type_;
 
         int n;
         int n_power;
@@ -137,7 +218,7 @@ namespace heongpu
         std::shared_ptr<DeviceVector<Data64>> upper_half_threshold_;
         std::shared_ptr<DeviceVector<Data64>> decryption_modulus_;
 
-        // CKKS switchkey parameters (Method II)
+        // CKKS key switching parameters
         int m_leveled;
         std::shared_ptr<std::vector<int>> l_leveled;
         std::shared_ptr<std::vector<int>> l_tilda_leveled;
@@ -174,6 +255,12 @@ namespace heongpu
         // int* prime_location_leveled;
         std::shared_ptr<DeviceVector<int>> prime_location_leveled;
     };
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContextImpl<Scheme::CKKS>& object);
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContext<Scheme::CKKS>& context);
 
 } // namespace heongpu
 #endif // HEONGPU_CKKS_CONTEXT_H

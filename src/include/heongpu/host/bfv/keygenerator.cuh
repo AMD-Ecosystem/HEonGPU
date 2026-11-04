@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -47,7 +48,11 @@ namespace heongpu
         __host__ HEKeyGenerator(HEContext<Scheme::BFV> context);
 
         /**
-         * @brief Generates a secret key.
+         * @brief Generates an exact-weight ternary secret key using private
+         * CSPRNG output.
+         *
+         * Legacy seed setters do not control secret-key sampling.
+         * @throws std::runtime_error if private random generation fails.
          *
          * @param sk Reference to the Secretkey object where the generated
          * secret key will be stored.
@@ -65,7 +70,7 @@ namespace heongpu
          * public key.
          */
         __host__ void generate_public_key(
-            Publickey<Scheme::BFV>& pk, Secretkey<Scheme::BFV>& sk,
+            Publickey<Scheme::BFV>& pk, const Secretkey<Scheme::BFV>& sk,
             const ExecutionOptions& options = ExecutionOptions());
 
         /**
@@ -78,21 +83,10 @@ namespace heongpu
          */
         __host__ void
         generate_relin_key(Relinkey<Scheme::BFV>& rk,
-                           Secretkey<Scheme::BFV>& sk,
+                           const Secretkey<Scheme::BFV>& sk,
                            const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(rk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_relin_key_method_I(rk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_bfv_relin_key_method_II(rk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            generate_bfv_relin_key(rk, sk, options);
         }
 
         /**
@@ -104,21 +98,10 @@ namespace heongpu
          * Galois key.
          */
         __host__ void generate_galois_key(
-            Galoiskey<Scheme::BFV>& gk, Secretkey<Scheme::BFV>& sk,
+            Galoiskey<Scheme::BFV>& gk, const Secretkey<Scheme::BFV>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(gk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_galois_key_method_I(gk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_bfv_galois_key_method_II(gk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            generate_bfv_galois_key(gk, sk, options);
         }
 
         /**
@@ -131,48 +114,12 @@ namespace heongpu
          * @param old_sk Reference to the old Secretkey object to switch from.
          */
         __host__ void generate_switch_key(
-            Switchkey<Scheme::BFV>& swk, Secretkey<Scheme::BFV>& new_sk,
-            Secretkey<Scheme::BFV>& old_sk,
+            Switchkey<Scheme::BFV>& swk, const Secretkey<Scheme::BFV>& new_sk,
+            const Secretkey<Scheme::BFV>& old_sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(swk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_switch_key_method_I(swk, new_sk, old_sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_bfv_switch_key_method_II(swk, new_sk, old_sk,
-                                                      options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            generate_bfv_switch_key(swk, new_sk, old_sk, options);
         }
-
-        /**
-         * @brief Returns the seed of the key generator.
-         *
-         * @return int Seed of the key generator.
-         */
-        inline int get_seed() const noexcept { return seed_; }
-
-        /**
-         * @brief Sets the seed of the key generator with new seed.
-         */
-        inline void set_seed(int new_seed) { seed_ = new_seed; }
-
-        /**
-         * @brief Returns the offset of the key generator(curand).
-         *
-         * @return int Offset of the key generator.
-         */
-        inline int get_offset() const noexcept { return offset_; }
-
-        /**
-         * @brief Sets the offset of the key generator with new offset(curand).
-         */
-        inline void set_offset(int new_offset) { offset_ = new_offset; }
 
         HEKeyGenerator() = delete;
         HEKeyGenerator(const HEKeyGenerator& copy) = delete;
@@ -180,39 +127,86 @@ namespace heongpu
         HEKeyGenerator& operator=(const HEKeyGenerator& assign) = delete;
         HEKeyGenerator& operator=(HEKeyGenerator&& assign) = delete;
 
+        // Value-returning versions of the functions above. They give the
+        // same results.
+
+        /**
+         * @brief Returns a new secret key; see generate_secret_key.
+         */
+        __host__ Secretkey<Scheme::BFV>
+        secret_key(const ExecutionOptions& options = ExecutionOptions())
+        {
+            Secretkey<Scheme::BFV> output(context_);
+            generate_secret_key(output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Publickey of sk; see generate_public_key.
+         */
+        __host__ Publickey<Scheme::BFV>
+        public_key(const Secretkey<Scheme::BFV>& sk,
+                   const ExecutionOptions& options = ExecutionOptions())
+        {
+            Publickey<Scheme::BFV> output(context_);
+            generate_public_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Relinkey of sk; see generate_relin_key.
+         */
+        __host__ Relinkey<Scheme::BFV>
+        relin_key(const Secretkey<Scheme::BFV>& sk,
+                  const ExecutionOptions& options = ExecutionOptions())
+        {
+            Relinkey<Scheme::BFV> output(context_);
+            generate_relin_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Galoiskey of sk; see generate_galois_key.
+         */
+        __host__ Galoiskey<Scheme::BFV>
+        galois_key(const Secretkey<Scheme::BFV>& sk,
+                   const ExecutionOptions& options = ExecutionOptions())
+        {
+            Galoiskey<Scheme::BFV> output(context_);
+            generate_galois_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Galoiskey of sk for the given shifts; see
+         * generate_galois_key.
+         */
+        __host__ Galoiskey<Scheme::BFV>
+        galois_key(const Secretkey<Scheme::BFV>& sk, std::vector<int>& shifts,
+                   const ExecutionOptions& options = ExecutionOptions())
+        {
+            Galoiskey<Scheme::BFV> output(context_, shifts);
+            generate_galois_key(output, sk, options);
+            return output;
+        }
+
       private:
-        __host__ void
-        generate_relin_key_method_I(Relinkey<Scheme::BFV>& rk,
-                                    Secretkey<Scheme::BFV>& sk,
-                                    const ExecutionOptions& options);
+        __host__ void generate_bfv_relin_key(Relinkey<Scheme::BFV>& rk,
+                                             const Secretkey<Scheme::BFV>& sk,
+                                             const ExecutionOptions& options);
+
+        __host__ void generate_bfv_galois_key(Galoiskey<Scheme::BFV>& gk,
+                                              const Secretkey<Scheme::BFV>& sk,
+                                              const ExecutionOptions& options);
 
         __host__ void
-        generate_bfv_relin_key_method_II(Relinkey<Scheme::BFV>& rk,
-                                         Secretkey<Scheme::BFV>& sk,
-                                         const ExecutionOptions& options);
-
-        __host__ void
-        generate_galois_key_method_I(Galoiskey<Scheme::BFV>& gk,
-                                     Secretkey<Scheme::BFV>& sk,
-                                     const ExecutionOptions& options);
-
-        __host__ void
-        generate_bfv_galois_key_method_II(Galoiskey<Scheme::BFV>& gk,
-                                          Secretkey<Scheme::BFV>& sk,
-                                          const ExecutionOptions& options);
-
-        __host__ void generate_switch_key_method_I(
-            Switchkey<Scheme::BFV>& swk, Secretkey<Scheme::BFV>& new_sk,
-            Secretkey<Scheme::BFV>& old_sk, const ExecutionOptions& options);
-
-        __host__ void generate_bfv_switch_key_method_II(
-            Switchkey<Scheme::BFV>& swk, Secretkey<Scheme::BFV>& new_sk,
-            Secretkey<Scheme::BFV>& old_sk, const ExecutionOptions& options);
+        generate_bfv_switch_key(Switchkey<Scheme::BFV>& swk,
+                                const Secretkey<Scheme::BFV>& new_sk,
+                                const Secretkey<Scheme::BFV>& old_sk,
+                                const ExecutionOptions& options);
 
       private:
         HEContext<Scheme::BFV> context_;
-        int seed_;
-        int offset_; // Absolute offset into sequence (curand)
 
         RNGSeed new_seed_;
     };

@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -55,7 +56,7 @@ namespace heongpu
          */
         bool is_on_device() const noexcept
         {
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 return true;
             }
@@ -103,6 +104,19 @@ namespace heongpu
          */
         inline int size() const noexcept { return shape_; }
 
+        // LWE mask and body in the current storage location (see
+        // is_on_device()).
+        int32_t* a_data() noexcept
+        {
+            return is_on_device() ? a_device_location_.data()
+                                  : a_host_location_.data();
+        }
+        int32_t* b_data() noexcept
+        {
+            return is_on_device() ? b_device_location_.data()
+                                  : b_host_location_.data();
+        }
+
         Ciphertext() = default;
 
         Ciphertext(const Ciphertext& copy)
@@ -113,7 +127,7 @@ namespace heongpu
         {
             if (copy.ciphertext_generated_)
             {
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     a_device_location_.resize(copy.a_device_location_.size(),
                                               copy.a_device_location_.stream());
@@ -179,7 +193,7 @@ namespace heongpu
 
                 if (copy.ciphertext_generated_)
                 {
-                    if (copy.storage_type_ == storage_type::DEVICE)
+                    if (copy.storage_type_ == storage_type::device)
                     {
                         a_device_location_.resize(
                             copy.a_device_location_.size(),
@@ -245,8 +259,8 @@ namespace heongpu
         const scheme_type scheme_ = scheme_type::tfhe;
 
         int n_;
-        int alpha_min_;
-        int alpha_max_;
+        double alpha_min_;
+        double alpha_max_;
 
         int shape_;
 

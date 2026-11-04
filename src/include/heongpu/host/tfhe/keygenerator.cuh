@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -28,7 +29,9 @@ namespace heongpu
         __host__ HEKeyGenerator(HEContext<Scheme::TFHE> context);
 
         /**
-         * @brief Generates a TFHE secret key.
+         * @brief Generates independent binary LWE and TLWE keys using private
+         * CSPRNG output.
+         * @throws std::runtime_error if private random generation fails.
          *
          * Writes the result to the provided `sk` object.
          *
@@ -50,13 +53,12 @@ namespace heongpu
          * @param options Optional CUDA execution settings.
          */
         __host__ void generate_bootstrapping_key(
-            Bootstrappingkey<Scheme::TFHE>& bk, Secretkey<Scheme::TFHE>& sk,
+            Bootstrappingkey<Scheme::TFHE>& bk,
+            const Secretkey<Scheme::TFHE>& sk,
             const ExecutionOptions& options = ExecutionOptions());
 
       private:
         HEContext<Scheme::TFHE> context_;
-        int rng_seed_;
-        int rng_offset_;
     };
 
 } // namespace heongpu

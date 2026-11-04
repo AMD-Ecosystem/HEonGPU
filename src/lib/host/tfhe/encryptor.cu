@@ -1,35 +1,36 @@
-﻿// Copyright 2024-2026 Alişah Özcan
+// Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
 #include <heongpu/host/tfhe/encryptor.cuh>
+#include "../secure_random.h"
 
 namespace heongpu
 {
-    __host__
-    HEEncryptor<Scheme::TFHE>::HEEncryptor(HEContext<Scheme::TFHE> context,
-                                           Secretkey<Scheme::TFHE>& secret_key)
+    __host__ HEEncryptor<Scheme::TFHE>::HEEncryptor(
+        HEContext<Scheme::TFHE> context,
+        const Secretkey<Scheme::TFHE>& secret_key)
     {
         if (!context)
         {
-            throw std::invalid_argument("HEContext is not set!");
+            throw ParameterError("HEContext is not set! Pass a context "
+                                 "created with GenHEContext.");
         }
 
         context_ = std::move(context);
 
+        secret_key.validate_context(context_);
         if (!secret_key.secret_key_generated_)
         {
             throw std::runtime_error("Secretkey was not generated!");
         }
 
-        std::random_device rd;
-        rng = std::mt19937(rd());
-
         alpha_min_ = secret_key.lwe_alpha_min;
         alpha_max_ = secret_key.lwe_alpha_max;
 
-        if (secret_key.storage_type_ == storage_type::DEVICE)
+        if (secret_key.storage_type_ == storage_type::device)
         {
             lwe_key_device_location_ = secret_key.lwe_key_device_location_;
         }
@@ -39,56 +40,46 @@ namespace heongpu
                 DeviceVector<int32_t>(secret_key.lwe_key_host_location_);
         }
 
-        std::uniform_int_distribution<uint64_t> dist64(0, UINT64_MAX);
-        cuda_seed = dist64(rng);
-        total_state = 512 * 32;
         HEONGPU_CUDA_CHECK(
-            cudaMalloc(&cuda_rng, total_state * sizeof(curandState)));
-
-        initialize_random_states_kernel<<<((total_state + 511) >> 9), 512>>>(
-            cuda_rng, cuda_seed, total_state);
+            cudaStreamSynchronize(lwe_key_device_location_.stream()));
     }
 
     __host__ void HEEncryptor<Scheme::TFHE>::encrypt_lwe_symmetric(
         Ciphertext<Scheme::TFHE>& ciphertext, std::vector<int32_t>& messages,
         const cudaStream_t stream)
     {
+        detail::SecretKeyRandomGenerator random;
         std::normal_distribution<double> dist(0.0, alpha_min_);
-
-        std::vector<int32_t> noise;
-        noise.reserve(ciphertext.shape_);
-        for (size_t i = 0; i < ciphertext.shape_; i++)
+        detail::PrivateRandomBuffer<int32_t> a(
+            static_cast<size_t>(context_->n_) * ciphertext.shape_);
+        detail::PrivateRandomBuffer<int32_t> b(ciphertext.shape_);
+        detail::private_random_bytes(a.values.data(),
+                                     a.values.size() * sizeof(int32_t));
+        for (size_t i = 0; i < ciphertext.shape_; ++i)
+            b.values[i] =
+                static_cast<int32_t>(uint32_t(messages[i]) +
+                                     uint32_t(detail::torus32(dist(random))));
+        DeviceVector<int32_t> a_device(a.values, stream);
+        DeviceVector<int32_t> b_device(b.values, stream);
+        HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
+        ciphertext.a_device_location_ = std::move(a_device);
+        ciphertext.b_device_location_ = std::move(b_device);
+        if (ciphertext.shape_ != 0)
         {
-            noise.push_back(double_to_torus32(dist(rng)));
+            const int threads = 512;
+            const int block_count = std::min<size_t>(32, ciphertext.shape_);
+            const size_t smem = (threads / 32 + 1) * sizeof(uint32_t);
+            encrypt_lwe_kernel<<<block_count, threads, smem, stream>>>(
+                lwe_key_device_location_.data(),
+                ciphertext.a_device_location_.data(),
+                ciphertext.b_device_location_.data(), context_->n_,
+                ciphertext.shape_);
+            HEONGPU_CUDA_CHECK(cudaGetLastError());
         }
-
-        std::vector<int32_t> b;
-        b.reserve(ciphertext.shape_);
-
-        for (size_t i = 0; i < ciphertext.shape_; i++)
-        {
-            uint32_t sum = uint32_t(messages[i]) + uint32_t(noise[i]);
-            b.push_back(static_cast<int32_t>(sum));
-        }
-
-        const int THREADS = 512;
-        int block_count = (ciphertext.shape_ >= 32)
-                              ? 32
-                              : ciphertext.shape_; // 32 come from rng states!
-        size_t smem = (THREADS / 32 + 1) * sizeof(uint32_t);
-
-        ciphertext.a_device_location_.resize(context_->n_ * ciphertext.shape_);
-        ciphertext.b_device_location_ = DeviceVector<int32_t>(b);
-        encrypt_lwe_kernel<<<block_count, THREADS, smem>>>(
-            cuda_rng, lwe_key_device_location_.data(),
-            ciphertext.a_device_location_.data(),
-            ciphertext.b_device_location_.data(), context_->n_,
-            ciphertext.shape_, total_state);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
 
         ciphertext.variances_ =
             std::vector<double>(ciphertext.shape_, alpha_min_ * alpha_min_);
-        ciphertext.storage_type_ = storage_type::DEVICE;
+        ciphertext.storage_type_ = storage_type::device;
     }
 
     __host__ int32_t
@@ -97,32 +88,6 @@ namespace heongpu
         uint64_t interval = ((1ULL << 63) / m_size) * 2;
         uint64_t phase64 = mu * interval;
         return static_cast<int32_t>(phase64 >> 32);
-    }
-
-    __host__ inline int32_t
-    HEEncryptor<Scheme::TFHE>::double_to_torus32(double input)
-    {
-        double frac = input - std::trunc(input);
-        uint32_t result = static_cast<uint32_t>(
-            std::llround(frac * static_cast<double>(1ULL << 32)));
-        return static_cast<int32_t>(result);
-    }
-
-    __host__ std::vector<int32_t> HEEncryptor<Scheme::TFHE>::double_to_torus32(
-        const std::vector<double>& input)
-    {
-        std::vector<int32_t> result;
-        result.reserve(input.size());
-        for (double v : input)
-        {
-            result.push_back(double_to_torus32(v));
-        }
-        return result;
-    }
-
-    __host__ HEEncryptor<Scheme::TFHE>::~HEEncryptor()
-    {
-        cudaFree(cuda_rng);
     }
 
 } // namespace heongpu

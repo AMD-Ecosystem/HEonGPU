@@ -46,7 +46,7 @@ namespace heongpu
          * decryption.
          */
         __host__ HEDecryptor(HEContext<Scheme::BFV> context,
-                             Secretkey<Scheme::BFV>& secret_key);
+                             const Secretkey<Scheme::BFV>& secret_key);
 
         /**
          * @brief Decrypts a ciphertext into a plaintext, automatically
@@ -58,9 +58,11 @@ namespace heongpu
          */
         __host__ void
         decrypt(Plaintext<Scheme::BFV>& plaintext,
-                Ciphertext<Scheme::BFV>& ciphertext,
+                const Ciphertext<Scheme::BFV>& ciphertext,
                 const ExecutionOptions& options = ExecutionOptions())
         {
+            ciphertext.validate_context(context_);
+
             input_storage_manager(
                 ciphertext,
                 [&](Ciphertext<Scheme::BFV>& ciphertext_)
@@ -72,9 +74,11 @@ namespace heongpu
                             decrypt_bfv(plaintext_, ciphertext_,
                                         options.stream_);
 
-                            plaintext.plain_size_ = context_->n;
-                            plaintext.scheme_ = context_->scheme_;
-                            plaintext.in_ntt_domain_ = false;
+                            plaintext_.plain_size_ = context_->n;
+                            plaintext_.scheme_ = context_->scheme_;
+                            plaintext_.context_id_ = context_->context_id_;
+                            plaintext_.in_ntt_domain_ = false;
+                            plaintext_.plaintext_generated_ = true;
                         },
                         options);
                 },
@@ -89,41 +93,33 @@ namespace heongpu
          * @return int The remainder of the noise budget in the ciphertext.
          */
         __host__ int remainder_noise_budget(
-            Ciphertext<Scheme::BFV>& ciphertext,
+            const Ciphertext<Scheme::BFV>& ciphertext,
             const ExecutionOptions& options = ExecutionOptions())
         {
             return noise_budget_calculation(ciphertext, options);
         }
-
-        /**
-         * @brief Returns the seed of the decryptor.
-         *
-         * @return int Seed of the decryptor.
-         */
-        inline int get_seed() const noexcept { return seed_; }
-
-        /**
-         * @brief Sets the seed of the decryptor with new seed.
-         */
-        inline void set_seed(int new_seed) { seed_ = new_seed; }
-
-        /**
-         * @brief Returns the offset of the decryptor(curand).
-         *
-         * @return int Offset of the decryptor.
-         */
-        inline int get_offset() const noexcept { return offset_; }
-
-        /**
-         * @brief Sets the offset of the decryptor with new offset(curand).
-         */
-        inline void set_offset(int new_offset) { offset_ = new_offset; }
 
         HEDecryptor() = default;
         HEDecryptor(const HEDecryptor& copy) = default;
         HEDecryptor(HEDecryptor&& source) = default;
         HEDecryptor& operator=(const HEDecryptor& assign) = default;
         HEDecryptor& operator=(HEDecryptor&& assign) = default;
+
+        // Value-returning versions of the functions above. They give the
+        // same results.
+
+        /**
+         * @brief Returns ciphertext decrypted into a new plaintext; see
+         * decrypt(plaintext, ciphertext).
+         */
+        __host__ Plaintext<Scheme::BFV>
+        decrypt(const Ciphertext<Scheme::BFV>& ciphertext,
+                const ExecutionOptions& options = ExecutionOptions())
+        {
+            Plaintext<Scheme::BFV> output(context_, options);
+            decrypt(output, ciphertext, options);
+            return output;
+        }
 
       private:
         __host__ void decrypt_bfv(Plaintext<Scheme::BFV>& plaintext,
@@ -135,7 +131,7 @@ namespace heongpu
                                     const cudaStream_t stream);
 
         __host__ int noise_budget_calculation(
-            Ciphertext<Scheme::BFV>& ciphertext,
+            const Ciphertext<Scheme::BFV>& ciphertext,
             const ExecutionOptions& options = ExecutionOptions());
 
         __host__ void
@@ -151,8 +147,6 @@ namespace heongpu
 
       private:
         HEContext<Scheme::BFV> context_;
-        int seed_;
-        int offset_; // Absolute offset into sequence (curand)
 
         DeviceVector<Data64> secret_key_;
     };

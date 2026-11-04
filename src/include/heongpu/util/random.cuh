@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <memory>
 #include <vector>
+#include <heongpu/util/error.h>
 #include "gpuntt/common/common.cuh"
 #include "gpufft/complex.cuh"
 #include "rngongpu/rand_aes/aes_rng.cuh"
@@ -29,10 +31,12 @@ namespace heongpu
         {
             key_ = std::vector<unsigned char>(16); // for 128 bit
             if (1 != RAND_bytes(key_.data(), key_.size()))
-                throw std::runtime_error("RAND_bytes failed");
+                throw SystemError("RAND_bytes failed! OpenSSL could not "
+                                  "generate random bytes.");
             nonce_ = std::vector<unsigned char>(8); // for 128 bit
             if (1 != RAND_bytes(nonce_.data(), nonce_.size()))
-                throw std::runtime_error("RAND_bytes failed");
+                throw SystemError("RAND_bytes failed! OpenSSL could not "
+                                  "generate random bytes.");
         }
 
         RNGSeed(const std::vector<unsigned char>& key,
@@ -59,6 +63,10 @@ namespace heongpu
                    const std::vector<unsigned char>& personalization_string,
                    rngongpu::SecurityLevel security_level,
                    bool prediction_resistance_enabled);
+
+        // Releases the generator; the next initialize() creates a new one.
+        // Used by heongpu::shutdown().
+        void release();
 
         ~RandomNumberGenerator();
 
@@ -699,14 +707,53 @@ namespace heongpu
             std::vector<unsigned char> additional_input,
             cudaStream_t stream = cudaStreamDefault);
 
+        /**
+         * @brief Runs function with the generator seeded by seed, then seeds
+         * the generator with a new random seed, also if function throws.
+         * Other threads draw no numbers in between, so they never get numbers
+         * of seed, which other parties may know. function may call the
+         * generation functions of the generator.
+         */
+        template <typename F>
+        void with_seed(const RNGSeed& seed, cudaStream_t stream, F&& function)
+        {
+            std::lock_guard<std::recursive_mutex> guard(mutex_);
+            struct Reseed
+            {
+                RandomNumberGenerator& generator;
+                cudaStream_t stream;
+                ~Reseed()
+                {
+                    try
+                    {
+                        RNGSeed fresh;
+                        generator.set(fresh.key_, fresh.nonce_,
+                                      fresh.personalization_string_, stream);
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            };
+            set(seed.key_, seed.nonce_, seed.personalization_string_, stream);
+            Reseed reseed{*this, stream};
+            function();
+        }
+
       private:
         RandomNumberGenerator();
         RandomNumberGenerator(const RandomNumberGenerator&) = delete;
         RandomNumberGenerator& operator=(const RandomNumberGenerator&) = delete;
 
+        // The generator; throws StateError if it is not initialized. Called
+        // with mutex_ held.
+        rngongpu::RNG<rngongpu::Mode::AES>& generator();
+
         static std::shared_ptr<rngongpu::RNG<rngongpu::Mode::AES>> generator_;
         static bool initialized_;
-        static std::mutex mutex_;
+        // Held by every function, so that a seeded sequence of with_seed and
+        // release() wait for calls of other threads.
+        static std::recursive_mutex mutex_;
     };
 
 } // namespace heongpu

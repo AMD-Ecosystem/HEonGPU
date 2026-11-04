@@ -12,13 +12,16 @@ Before building the library, ensure your development environment meets the follo
 
 **System Dependencies:**
 
-* **CMake**: Version 3.26.4 or higher
-* **GCC**: A modern C++ compiler with C++17 support
+* **CMake**: Version 4.0 or higher
+* **GCC**: A modern C++ compiler with C++20 support (tested with GCC 11.4)
 * **GMP**: The GNU Multiple Precision Arithmetic Library
-* **CUDA Toolkit**: Version 11.4 or higher (for NVIDIA GPUs)
+* **NTL**: A Library for doing Number Theory
+* **CUDA Toolkit**: Version 12.8 or higher (for NVIDIA GPUs)
 * **ROCm**: Version 7.2 or higher (for AMD GPUs)
-* **OpenSSL**: Version 1.1.0 or higher
+* **OpenSSL**: Version 1.1.1 or higher
 * **ZLIB**: The data compression library
+
+On Ubuntu, the system packages are installed with ``sudo apt install libgmp-dev libntl-dev libssl-dev zlib1g-dev``.
 
 Building the Library
 --------------------
@@ -30,17 +33,23 @@ The library uses a standard CMake build process. The most critical configuration
 
     .. code-block:: bash
 
-        git clone https://github.com/Alisah-Ozcan/HEonGPU.git
+        git clone --recursive https://github.com/Alisah-Ozcan/HEonGPU.git
         cd HEonGPU
 
+    GPU-NTT, GPU-FFT and RNGonGPU are git submodules. If the repository was cloned without ``--recursive``, fetch them with ``git submodule update --init --recursive``.
+
 **Step 2: Configure with CMake**
-    Run CMake from the root of the repository to generate the build files. You **must** set the ``CMAKE_CUDA_ARCHITECTURES`` variable to match your GPU's architecture. This flag instructs the CUDA compiler (``nvcc``) to generate code specifically optimized for your hardware.
+    Run CMake from the root of the repository to generate the build files. Without ``CMAKE_CUDA_ARCHITECTURES`` (or the ``CUDAARCHS`` environment variable), HEonGPU builds for the architecture of the first GPU of the machine. To build for another GPU or several, for example on a machine without one, set ``CMAKE_CUDA_ARCHITECTURES``; this instructs the CUDA compiler (``nvcc``) to generate code for that hardware.
 
     .. code-block:: bash
 
         cmake -S . -D CMAKE_CUDA_ARCHITECTURES=XX -B build
 
     Replace ``XX`` with the appropriate value from the table below. For example, for an NVIDIA RTX 4090 (Ada Lovelace architecture), you would use ``89``.
+
+    Configuring downloads RMM, and GoogleTest when the tests are enabled and no installed GoogleTest is found. To build without network access, install RMM 26.08 (and GoogleTest for the tests), pass their location with ``-D CMAKE_PREFIX_PATH=<dir>`` and set ``-D HEonGPU_USE_SYSTEM_RMM=ON``.
+
+    When HEonGPU builds RMM from source, installing HEonGPU also installs this RMM, because the installed HEonGPU needs it. If another RMM version is installed at the same prefix, configuring warns that it would be replaced. ``-D HEonGPU_USE_SYSTEM_RMM=ON`` uses an installed RMM 26.08 and never downloads RMM; ``-D HEonGPU_INSTALL_RMM=OFF`` does not install the RMM built from source, so projects that use the installed HEonGPU have to provide RMM 26.08 themselves.
 
     .. list-table:: GPU Architecture to CMAKE_CUDA_ARCHITECTURES Mapping
        :widths: 25 25
@@ -55,7 +64,11 @@ The library uses a standard CMake build process. The most critical configuration
        * - Ampere
          - 80, 86
        * - Ada Lovelace
-         - 89, 90
+         - 89
+       * - Hopper
+         - 90
+       * - Blackwell
+         - 100, 120
 
     On AMD GPUs, configure with ``-D USE_HIP=ON`` instead. ``CMAKE_HIP_ARCHITECTURES`` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card. This builds the GPU sources with HIP and uses hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by hipMM (https://github.com/AMD-Ecosystem/hipMM), the ROCm-DS port of RMM, which keeps RMM's API.
 
@@ -91,6 +104,12 @@ The library uses a standard CMake build process. The most critical configuration
     .. code-block:: bash
 
         sudo cmake --install build
+
+    To install somewhere else, for example without ``sudo``, pass a prefix, and point your project to it with ``-D CMAKE_PREFIX_PATH=<dir>``. The installed package can be moved to another directory afterwards.
+
+    .. code-block:: bash
+
+        cmake --install build --prefix $HOME/.local
 
 Verifying the Installation
 --------------------------
@@ -129,20 +148,20 @@ The following "toy example" from the repository demonstrates a complete FHE work
 .. code-block:: cpp
    :linenos:
 
-    #include "heongpu.cuh"
+    #include <heongpu/heongpu.hpp>
 
     int main() {     
-        // 1. Set up the HEContext for the BFV scheme
-        heongpu::HEContext<heongpu::Scheme::BFV> context =
-                heongpu::GenHEContext<heongpu::Scheme::BFV>();
+        // 1. Choose the encryption parameters for the BFV scheme: one
+        //    multiplication in a row with a 20 bit plaintext modulus at
+        //    128-bit security
+        heongpu::HEParams<heongpu::Scheme::BFV> params;
+        params.multiplicative_depth = 1;
+        params.plain_modulus_bit_size = 20;
 
-        // 2. Define and set encryption parameters
-        size_t poly_modulus_degree = 8192;
-        context.set_poly_modulus_degree(poly_modulus_degree);
-        context.set_coeff_modulus_default_values(1); // Use 1 default prime for the coeff modulus
-        int plain_modulus = 1032193;
-        context.set_plain_modulus(plain_modulus);
-        context.generate(); // Finalize context and pre-compute values on GPU
+        // 2. Set up the HEContext with them
+        heongpu::HEContext<heongpu::Scheme::BFV> context = params.make_context();
+        context->generate(); // Finalize context and pre-compute values on GPU
+        size_t poly_modulus_degree = context->get_poly_modulus_degree();
 
         // 3. Generate keys
         heongpu::HEKeyGenerator<heongpu::Scheme::BFV> keygen(context);

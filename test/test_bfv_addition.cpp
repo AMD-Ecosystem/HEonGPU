@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -44,6 +45,9 @@ TEST(HEonGPU, BFV_Ciphertext_Ciphertext_Addition_Subtraction)
             message1[i] = dis(gen);
             message2[i] = dis(gen);
         }
+        // Exercise the m1 + m2 == t boundary on every run.
+        message1[0] = plain_modulus - 1;
+        message2[0] = 1;
 
         std::vector<uint64_t> message_addition_result(poly_modulus_degree,
                                                       0ULL);
@@ -143,6 +147,9 @@ TEST(HEonGPU, BFV_Ciphertext_Ciphertext_Addition_Subtraction)
             message1[i] = dis(gen);
             message2[i] = dis(gen);
         }
+        // Exercise the m1 + m2 == t boundary on every run.
+        message1[0] = plain_modulus - 1;
+        message2[0] = 1;
 
         std::vector<uint64_t> message_addition_result(poly_modulus_degree,
                                                       0ULL);
@@ -243,6 +250,9 @@ TEST(HEonGPU, BFV_Ciphertext_Ciphertext_Addition_Subtraction)
             message1[i] = dis(gen);
             message2[i] = dis(gen);
         }
+        // Exercise the m1 + m2 == t boundary on every run.
+        message1[0] = plain_modulus - 1;
+        message2[0] = 1;
 
         std::vector<uint64_t> message_addition_result(poly_modulus_degree,
                                                       0ULL);
@@ -343,6 +353,9 @@ TEST(HEonGPU, BFV_Ciphertext_Ciphertext_Addition_Subtraction)
             message1[i] = dis(gen);
             message2[i] = dis(gen);
         }
+        // Exercise the m1 + m2 == t boundary on every run.
+        message1[0] = plain_modulus - 1;
+        message2[0] = 1;
 
         std::vector<uint64_t> message_addition_result(poly_modulus_degree,
                                                       0ULL);
@@ -445,6 +458,9 @@ TEST(HEonGPU, BFV_Ciphertext_Ciphertext_Addition_Subtraction)
             message1[i] = dis(gen);
             message2[i] = dis(gen);
         }
+        // Exercise the m1 + m2 == t boundary on every run.
+        message1[0] = plain_modulus - 1;
+        message2[0] = 1;
 
         std::vector<uint64_t> message_addition_result(poly_modulus_degree,
                                                       0ULL);

@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -19,6 +20,7 @@ namespace heongpu
         template <Scheme S> friend class HEArithmeticOperator;
         template <Scheme S> friend class HELogicOperator;
         template <Scheme S> friend class HEMultiPartyManager;
+        template <Scheme S> friend class HESession;
 
         template <typename T, typename F>
         friend void input_storage_manager(T& object, F function,
@@ -59,7 +61,7 @@ namespace heongpu
          */
         bool is_on_device() const noexcept
         {
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 return true;
             }
@@ -75,6 +77,7 @@ namespace heongpu
          * @return Data64* Pointer to the data.
          */
         Data64* data();
+        const Data64* data() const;
 
         /**
          * @brief Copies the data from the device to the host.
@@ -166,6 +169,12 @@ namespace heongpu
             return relinearization_required_;
         }
 
+        /**
+         * @brief Returns a one line description, for example for logs and
+         * error reports. Also written by operator<<.
+         */
+        std::string to_string() const;
+
         Ciphertext() = default;
 
         Ciphertext(const Ciphertext& copy)
@@ -175,9 +184,10 @@ namespace heongpu
               in_ntt_domain_(copy.in_ntt_domain_),
               storage_type_(copy.storage_type_),
               relinearization_required_(copy.relinearization_required_),
-              ciphertext_generated_(copy.ciphertext_generated_)
+              ciphertext_generated_(copy.ciphertext_generated_),
+              context_id_(copy.context_id_)
         {
-            if (copy.storage_type_ == storage_type::DEVICE)
+            if (copy.storage_type_ == storage_type::device)
             {
                 device_locations_.resize(copy.device_locations_.size(),
                                          copy.device_locations_.stream());
@@ -206,6 +216,7 @@ namespace heongpu
               relinearization_required_(
                   std::move(assign.relinearization_required_)),
               ciphertext_generated_(std::move(assign.ciphertext_generated_)),
+              context_id_(assign.context_id_),
               device_locations_(std::move(assign.device_locations_)),
               host_locations_(std::move(assign.host_locations_))
         {
@@ -224,8 +235,9 @@ namespace heongpu
 
                 relinearization_required_ = copy.relinearization_required_;
                 ciphertext_generated_ = copy.ciphertext_generated_;
+                context_id_ = copy.context_id_;
 
-                if (copy.storage_type_ == storage_type::DEVICE)
+                if (copy.storage_type_ == storage_type::device)
                 {
                     device_locations_.resize(copy.device_locations_.size(),
                                              copy.device_locations_.stream());
@@ -262,6 +274,7 @@ namespace heongpu
                     std::move(assign.relinearization_required_);
 
                 ciphertext_generated_ = std::move(assign.ciphertext_generated_);
+                context_id_ = assign.context_id_;
 
                 device_locations_ = std::move(assign.device_locations_);
                 host_locations_ = std::move(assign.host_locations_);
@@ -269,7 +282,8 @@ namespace heongpu
             return *this;
         }
 
-        void save(std::ostream& os) const;
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -285,11 +299,13 @@ namespace heongpu
         bool relinearization_required_;
 
         bool ciphertext_generated_ = false;
+        std::uint64_t context_id_ = 0;
 
         DeviceVector<Data64> device_locations_;
         HostVector<Data64> host_locations_;
 
-        int memory_size();
+        void validate_context(const HEContext<Scheme::BFV>& context) const;
+        int memory_size() const;
         void memory_clear(cudaStream_t stream);
         void memory_set(DeviceVector<Data64>&& new_device_vector);
 
@@ -297,6 +313,9 @@ namespace heongpu
         void remove_from_device(cudaStream_t stream);
         void remove_from_host();
     };
+
+    std::ostream& operator<<(std::ostream& os,
+                             const Ciphertext<Scheme::BFV>& object);
 
 } // namespace heongpu
 #endif // HEONGPU_BFV_CIPHERTEXT_H

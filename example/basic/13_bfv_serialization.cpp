@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -59,12 +60,12 @@ constexpr auto Scheme = heongpu::Scheme::BFV;
 
 int main(int argc, char* argv[])
 {
-    // 2. Set up HE context (BFV scheme with key-switching METHOD_I)
-    heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
+    // 2. Set up HE context (BFV scheme)
+    heongpu::HEParams<Scheme> params;
     const size_t poly_modulus_degree = 4096;
-    context->set_poly_modulus_degree(poly_modulus_degree);
-    context->set_coeff_modulus_default_values(1);
-    context->set_plain_modulus(1032193);
+    params.poly_modulus_degree = poly_modulus_degree;
+    params.plain_modulus = 1032193;
+    heongpu::HEContext<Scheme> context = params.make_context();
 
     // 3. Serialize / deserialize the context
     std::stringstream ctx_stream;

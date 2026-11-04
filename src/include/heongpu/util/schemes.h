@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -66,6 +67,14 @@ namespace heongpu
 
     template <Scheme S> class HEMultiPartyManager;
 
+    template <Scheme S> struct HEParams;
+
+    template <Scheme S> struct HEParameterSet;
+
+    template <Scheme S> class HESession;
+
+    template <Scheme S> class SessionCiphertext;
+
     // Describes the type of encryption scheme to be used.
     enum class scheme_type : std::uint8_t
     {
@@ -103,33 +112,63 @@ namespace heongpu
         sec256 = 0x3
     };
 
-    enum class keyswitching_type : std::uint8_t
-    {
-        NONE = 0x0,
-        KEYSWITCHING_METHOD_I = 0x1, // SEALMETHOD = 0x1,
-        KEYSWITCHING_METHOD_II = 0x2, // EXTERNALPRODUCT = 0x2,
-    };
-
     enum class arithmetic_bootstrapping_type : std::uint8_t
     {
-        NONE = 0x0,
-        REGULAR_BOOTSTRAPPING = 0x1,
-        SLIM_BOOTSTRAPPING = 0x2,
+        none = 0x0,
+        regular = 0x1,
+        slim = 0x2
     };
 
     enum class logic_bootstrapping_type : std::uint8_t
     {
-        NONE = 0x0,
-        BIT_BOOTSTRAPPING = 0x1, // scale = q0 / 2. More detail:
-                                 // https://eprint.iacr.org/2024/767.pdf
-        GATE_BOOTSTRAPPING = 0x2, // scale = q0 / 3. More detail:
-                                  // https://eprint.iacr.org/2024/767.pdf
+        none = 0x0,
+        bit = 0x1, // https://eprint.iacr.org/2024/767.pdf
+        gate = 0x2 // https://eprint.iacr.org/2024/767.pdf
+    };
+
+    // How CKKS ciphertexts are rescaled; see
+    // HEContextImpl<Scheme::CKKS>::set_rescale_mode.
+    enum class rescale_mode : std::uint8_t
+    {
+        // The application rescales and brings operands to the same level.
+        manual = 0x0,
+
+        // The operators rescale before the operations that need it and bring
+        // operands to the same level and scale.
+        automatic = 0x1
+    };
+
+    // The keys an HESession has, and those it saves; see HESession::save.
+    enum class session_role : std::uint8_t
+    {
+        // All keys: encrypts, computes, decrypts and generates new rotation
+        // keys.
+        owner = 0x0,
+
+        // The public key and the evaluation keys: encrypts and computes, as
+        // a server that must not decrypt.
+        evaluator = 0x1,
+
+        // The public key: encrypts, and computes without the products of
+        // ciphertexts and the rotations.
+        encryptor = 0x2
     };
 
     enum class encoding : std::uint8_t
     {
-        SLOT = 0x0,
-        COEFFICIENT = 0x1
+        slot = 0x0,
+        coefficient = 0x1
+    };
+
+    enum class serialization_format : std::uint8_t
+    {
+        // 0x1 was the format v1 of HEonGPU 1.2 and earlier, the fields
+        // only, which HEonGPU 2.0 no longer writes but still reads.
+
+        // A header with a magic number, the format version, the object type,
+        // the scheme and the context identity before the fields. Readable by
+        // HEonGPU 1.3 and later.
+        v2 = 0x2
     };
 
 } // namespace heongpu

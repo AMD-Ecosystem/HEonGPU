@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
+#include <algorithm>
 #include <heongpu/kernel/contextpool.hpp>
 
 namespace heongpu
@@ -68,72 +69,61 @@ namespace heongpu
 
     KeySwitchParameterGenerator::KeySwitchParameterGenerator(
         int poly_degree, std::vector<Data64> modulus, int P_size,
-        scheme_type scheme, keyswitching_type method)
+        scheme_type scheme)
     {
         switch (static_cast<int>(scheme))
         {
             case 1: // BFV
-                if (static_cast<int>(method) == 2)
+                n_ = poly_degree;
+
+                // Digits of P_size primes, as for CKKS: a larger P splits Q
+                // into fewer digits.
+                m = P_size;
+
+                first_Qtilda_ = modulus.size();
+                first_Q_ = first_Qtilda_ - P_size;
+                first_P_ = P_size;
+
+                for (int i = 0; i < first_Qtilda_; i++)
                 {
-                    n_ = poly_degree;
-
-                    first_Qtilda_ = modulus.size();
-                    first_Q_ = first_Qtilda_ - P_size;
-                    first_P_ = P_size;
-
-                    for (int i = 0; i < first_Qtilda_; i++)
-                    {
-                        modulus_vector.push_back((Modulus64) modulus[i]);
-                    }
-
-                    d_vector_ = d_counter(first_Q_, m);
-
-                    d_ = d_vector_.size();
+                    modulus_vector.push_back((Modulus64) modulus[i]);
                 }
-                else
-                {
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                }
+
+                d_vector_ = d_counter(first_Q_, m);
+
+                d_ = d_vector_.size();
                 break;
             case 2: // CKKS
 
-                if (static_cast<int>(method) == 2)
+                n_ = poly_degree;
+
+                m = P_size;
+
+                first_Qtilda_ = modulus.size();
+                first_Q_ = first_Qtilda_ - P_size;
+                first_P_ = P_size;
+
+                for (int i = 0; i < first_Qtilda_; i++)
                 {
-                    n_ = poly_degree;
-
-                    m = P_size;
-
-                    first_Qtilda_ = modulus.size();
-                    first_Q_ = first_Qtilda_ - P_size;
-                    first_P_ = P_size;
-
-                    for (int i = 0; i < first_Qtilda_; i++)
-                    {
-                        modulus_vector.push_back((Modulus64) modulus[i]);
-                    }
-
-                    for (int i = 0; i < first_Q_; i++)
-                    {
-                        level_Q_.push_back(first_Q_ - i);
-                        level_Qtilda_.push_back(first_Qtilda_ - i);
-                    }
-
-                    for (int i = 0; i < first_Q_; i++)
-                    {
-                        std::vector<int> d_vector_inner =
-                            d_counter(level_Q_[i], m);
-
-                        level_d_vector_.push_back(d_vector_inner);
-                    }
-
-                    for (int i = 0; i < first_Q_; i++)
-                    {
-                        level_d_.push_back(level_d_vector_[i].size());
-                    }
+                    modulus_vector.push_back((Modulus64) modulus[i]);
                 }
-                else
+
+                for (int i = 0; i < first_Q_; i++)
                 {
-                    throw std::invalid_argument("Invalid Key Switching Type");
+                    level_Q_.push_back(first_Q_ - i);
+                    level_Qtilda_.push_back(first_Qtilda_ - i);
+                }
+
+                for (int i = 0; i < first_Q_; i++)
+                {
+                    std::vector<int> d_vector_inner = d_counter(level_Q_[i], m);
+
+                    level_d_vector_.push_back(d_vector_inner);
+                }
+
+                for (int i = 0; i < first_Q_; i++)
+                {
+                    level_d_.push_back(level_d_vector_[i].size());
                 }
 
                 break;

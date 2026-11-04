@@ -1,27 +1,48 @@
 # Copyright 2024 Alişah Özcan
+# Copyright 2026 enCRYPTON-Labs
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 # Developer: Alişah Özcan
 
+# GPU-NTT, GPU-FFT and RNGonGPU are git submodules. Configuring does not fetch
+# them, so it needs no network and does not change the source tree.
+foreach(_heongpu_submodule IN ITEMS GPU-FFT GPU-NTT RNGonGPU)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_heongpu_submodule}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "thirdparty/${_heongpu_submodule} is missing. Clone HEonGPU with "
+            "'git clone --recursive', or run "
+            "'git submodule update --init --recursive' in the HEonGPU "
+            "source directory.")
+    endif()
+endforeach()
+
+# The AMD GPU support of GPU-NTT, GPU-FFT and RNGonGPU cannot live in their
+# checked-out trees, since they are separate repositories pinned here as
+# submodules. It is carried as patches applied on top of the pinned commits,
+# only for HIP builds; a patch already in place is left alone, so that
+# reconfiguring works.
 if(USE_HIP)
-    set(THIRDPARTY_BUILD_ARG ON)
-else()
-    set(THIRDPARTY_BUILD_ARG OFF)
+    find_package(Git REQUIRED)
+    foreach(_heongpu_submodule IN ITEMS GPU-NTT GPU-FFT RNGonGPU)
+        set(_heongpu_patch "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_heongpu_submodule}.patch")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${_heongpu_patch}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${_heongpu_submodule}
+            RESULT_VARIABLE _heongpu_patch_applied
+            OUTPUT_QUIET ERROR_QUIET)
+        if(NOT _heongpu_patch_applied EQUAL 0)
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} apply ${_heongpu_patch}
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${_heongpu_submodule}
+                RESULT_VARIABLE _heongpu_patch_result
+                ERROR_VARIABLE _heongpu_patch_error)
+            if(NOT _heongpu_patch_result EQUAL 0)
+                message(FATAL_ERROR
+                    "Applying ${_heongpu_patch} failed:\n${_heongpu_patch_error}")
+            endif()
+        endif()
+    endforeach()
 endif()
-
-execute_process(
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/build.sh ${THIRDPARTY_BUILD_ARG}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    RESULT_VARIABLE BUILD_SCRIPT_RESULT
-    OUTPUT_VARIABLE BUILD_SCRIPT_OUTPUT
-    ERROR_VARIABLE BUILD_SCRIPT_ERROR
-)
-
-if(NOT BUILD_SCRIPT_RESULT EQUAL 0)
-    message(FATAL_ERROR "Thirdparty build script failed:\n${BUILD_SCRIPT_ERROR}")
-endif()
-
-message(STATUS "Thirdparty build completed successfully")
 
 include(FetchContent)
 
@@ -48,37 +69,131 @@ endif()
 
 # RMM (RAPIDS Memory Manager)
 # On HIP builds the same interface comes from hipMM, the ROCm-DS port of RMM,
-# which keeps RMM's target name, rmm:: namespace, and header layout, so the
-# sources that use rmm compile unchanged on both platforms.
-if(NOT USE_HIP)
-    FetchContent_Declare(
-        rmm
-        GIT_REPOSITORY https://github.com/rapidsai/rmm
-        GIT_TAG        branch-25.08
-        SOURCE_SUBDIR  cpp
-    )
-else()
-    FetchContent_Declare(
-        rmm
-        GIT_REPOSITORY https://github.com/AMD-Ecosystem/hipMM
-        # release/rocmds-26.03 line, pinned by commit: hipMM publishes no
-        # release tags yet and the branch moves.
-        GIT_TAG        22732e49aa00ba179847e3b314371f2307f47a9a
-        SOURCE_SUBDIR  cpp
-    )
-endif()
-set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(rmm)
+# which keeps RMM's target name, rmm:: namespace, and header layout. hipMM has
+# its own version numbers.
 if(USE_HIP)
-    # hipMM expects a HIP-capable compiler for its own sources (its hip
-    # dependency injects -x hip into their compile flags, which a plain C++
-    # compiler rejects). Compiling them as HIP sources satisfies that the same
-    # way this port compiles its own GPU sources.
-    get_target_property(_rmm_source_dir rmm SOURCE_DIR)
-    get_target_property(_rmm_sources rmm SOURCES)
-    list(TRANSFORM _rmm_sources PREPEND "${_rmm_source_dir}/")
-    set_source_files_properties(${_rmm_sources} TARGET_DIRECTORY rmm
-                                PROPERTIES LANGUAGE HIP)
+    set(_heongpu_rmm_version 4.0)
+else()
+    set(_heongpu_rmm_version 26.08)
+endif()
+
+option(HEonGPU_USE_SYSTEM_RMM
+    "Use an installed RMM 26.08 and fail if there is none, instead of downloading and building RMM"
+    OFF)
+option(HEonGPU_INSTALL_RMM
+    "Install the RMM that HEonGPU builds from source together with HEonGPU (the installed HEonGPU needs an RMM 26.08)"
+    ON)
+
+if(HEonGPU_USE_SYSTEM_RMM)
+    find_package(rmm ${_heongpu_rmm_version} QUIET)
+    if(NOT rmm_FOUND)
+        message(FATAL_ERROR
+            "HEonGPU_USE_SYSTEM_RMM is ON, but no installed RMM ${_heongpu_rmm_version} was "
+            "found. Pass the prefix of an RMM ${_heongpu_rmm_version} installation with "
+            "CMAKE_PREFIX_PATH (or its config directory with rmm_DIR), or set "
+            "HEonGPU_USE_SYSTEM_RMM=OFF to download and build RMM.")
+    endif()
+else()
+    # RMM is downloaded and built. It is not looked up first: an RMM that an
+    # earlier HEonGPU install put into the install prefix would be found when
+    # reconfiguring, and HEonGPU would then silently stop building and
+    # installing its own. Use HEonGPU_USE_SYSTEM_RMM for an installed RMM.
+    set(_heongpu_rmm_options "")
+    if(NOT HEonGPU_INSTALL_RMM)
+        # Also leaves out the install rules of RMM and of its dependencies.
+        list(APPEND _heongpu_rmm_options EXCLUDE_FROM_ALL)
+    endif()
+    if(NOT USE_HIP)
+        FetchContent_Declare(
+            rmm
+            GIT_REPOSITORY https://github.com/rapidsai/rmm
+            GIT_TAG        v26.08.00
+            SOURCE_SUBDIR  cpp
+            ${_heongpu_rmm_options}
+        )
+    else()
+        FetchContent_Declare(
+            rmm
+            GIT_REPOSITORY https://github.com/AMD-Ecosystem/hipMM
+            # release/rocmds-26.03 line, pinned by commit: hipMM publishes no
+            # release tags yet and the branch moves.
+            GIT_TAG        22732e49aa00ba179847e3b314371f2307f47a9a
+            SOURCE_SUBDIR  cpp
+            ${_heongpu_rmm_options}
+        )
+    endif()
+
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+    # On HIP, hipMM brings the ROCm counterparts of CCCL itself.
+    if(NOT USE_HIP)
+        # RMM is written against the CCCL version it pins (3.4.x for RMM 26.08).
+        # The CCCL shipped with the CUDA Toolkit can be older (CUDA 12.x ships CCCL
+        # 2.x) or newer than that, and rapids-cmake would pick it up whenever it
+        # satisfies the minimum version. Always fetch the pinned CCCL.
+        set(CPM_DOWNLOAD_CCCL ON CACHE BOOL "Fetch the CCCL version pinned by RMM instead of using the CUDA Toolkit one")
+        if(CPM_DOWNLOAD_CCCL)
+            # Drop package locations cached by an earlier configure (e.g. pointing
+            # at the CUDA Toolkit's CCCL); otherwise the fetched Thrust would be
+            # paired with a mismatched CUB/libcudacxx from the toolkit.
+            foreach(_cccl_pkg IN ITEMS CCCL Thrust CUB libcudacxx)
+                unset(${_cccl_pkg}_DIR CACHE)
+            endforeach()
+        endif()
+    endif()
+
+    # RMM looks up its other dependencies with CPM, which prefers installed
+    # packages. When reconfiguring, it would find the copies that an earlier
+    # HEonGPU install put into the install prefix, and HEonGPU would stop
+    # building and installing its own. Build them from source as well.
+    foreach(_rmm_pkg IN ITEMS rapids_logger spdlog nvtx3)
+        set(CPM_DOWNLOAD_${_rmm_pkg} ON)
+        unset(${_rmm_pkg}_DIR CACHE)
+    endforeach()
+
+    FetchContent_MakeAvailable(rmm)
+    if(USE_HIP)
+        # hipMM expects a HIP-capable compiler for its own sources (its hip
+        # dependency injects -x hip into their compile flags, which a plain C++
+        # compiler rejects). Compiling them as HIP sources satisfies that the
+        # same way this port compiles its own GPU sources.
+        get_target_property(_rmm_source_dir rmm SOURCE_DIR)
+        get_target_property(_rmm_sources rmm SOURCES)
+        list(TRANSFORM _rmm_sources PREPEND "${_rmm_source_dir}/")
+        set_source_files_properties(${_rmm_sources} TARGET_DIRECTORY rmm
+                                    PROPERTIES LANGUAGE HIP)
+    endif()
+endif()
+
+if(rmm_FOUND)
+    message(STATUS "Using the installed RMM ${rmm_VERSION}: ${rmm_DIR}")
+else()
+    message(STATUS "Using RMM built from source")
+    if(HEonGPU_INSTALL_RMM)
+        # Installing HEonGPU also installs this RMM, which replaces another
+        # RMM version installed at the same prefix.
+        set(_heongpu_prefix_rmm
+            "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/cmake/rmm/rmm-config-version.cmake")
+        if(EXISTS "${_heongpu_prefix_rmm}")
+            file(STRINGS "${_heongpu_prefix_rmm}" _heongpu_prefix_rmm_version
+                REGEX "^set\\(PACKAGE_VERSION \"")
+            string(REGEX REPLACE ".*\"([^\"]*)\".*" "\\1"
+                _heongpu_prefix_rmm_version "${_heongpu_prefix_rmm_version}")
+        endif()
+        string(REPLACE "." "\\." _heongpu_rmm_version_regex "${_heongpu_rmm_version}")
+        if(EXISTS "${_heongpu_prefix_rmm}" AND
+           NOT _heongpu_prefix_rmm_version MATCHES "^${_heongpu_rmm_version_regex}\\.")
+            message(WARNING
+                "RMM ${_heongpu_prefix_rmm_version} is installed at "
+                "${CMAKE_INSTALL_PREFIX}. Installing HEonGPU there replaces it "
+                "with the RMM ${_heongpu_rmm_version} built for HEonGPU. To keep it, install "
+                "HEonGPU to another prefix, provide an installed RMM ${_heongpu_rmm_version} with "
+                "CMAKE_PREFIX_PATH, or set HEonGPU_INSTALL_RMM=OFF and provide "
+                "RMM ${_heongpu_rmm_version} when using the installed HEonGPU.")
+        endif()
+    else()
+        message(STATUS "RMM is not installed with HEonGPU (HEonGPU_INSTALL_RMM=OFF)")
+    endif()
 endif()
 
 # The submodules include <cuda_runtime.h> and <curand_kernel.h> by name. Putting
@@ -89,7 +204,6 @@ if(USE_HIP)
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/hip_compat/ DESTINATION include/hip_compat)
 endif()
 
-# Pass USE_HIP to subdirectories
 add_subdirectory(GPU-FFT)
 add_subdirectory(GPU-NTT)
 add_subdirectory(RNGonGPU)

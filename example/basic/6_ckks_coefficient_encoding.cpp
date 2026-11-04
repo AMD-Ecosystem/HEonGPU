@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -15,11 +16,13 @@ constexpr auto Scheme = heongpu::Scheme::CKKS;
 int main(int argc, char* argv[])
 {
     // Create CKKS context with user-defined parameters.
-    heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>(heongpu::sec_level_type::none);
-
+    heongpu::HEParams<Scheme> params;
+    params.security_level = heongpu::sec_level_type::none;
     const std::size_t poly_modulus_degree = 8192;
-    context->set_poly_modulus_degree(poly_modulus_degree);
-    context->set_coeff_modulus_bit_sizes({60, 40, 40, 60}, {60});
+    params.poly_modulus_degree = poly_modulus_degree;
+    params.coeff_modulus_bit_sizes = {60, 40, 40, 60};
+    params.special_modulus_bit_sizes = {60};
+    heongpu::HEContext<Scheme> context = params.make_context();
     context->generate();
 
     const double scale = std::pow(2.0, 40);
@@ -37,7 +40,8 @@ int main(int argc, char* argv[])
     heongpu::HEDecryptor<Scheme> decryptor(context, secret_key);
     heongpu::HEArithmeticOperator<Scheme> operators(context, encoder);
 
-    // In coefficient encoding, values are interpreted as polynomial coefficients.
+    // In coefficient encoding, values are interpreted as polynomial
+    // coefficients.
     std::vector<double> coeff_message(poly_modulus_degree, 0.0);
     coeff_message[0] = 1.25;
     coeff_message[1] = -2.0;
@@ -47,8 +51,8 @@ int main(int argc, char* argv[])
     coeff_message[5] = -1.5;
 
     heongpu::Plaintext<Scheme> coeff_plain(context);
-    encoder.encode(coeff_plain, coeff_message, scale, heongpu::ExecutionOptions(),
-                   heongpu::encoding::COEFFICIENT);
+    encoder.encode(coeff_plain, coeff_message, scale,
+                   heongpu::ExecutionOptions(), heongpu::encoding::coefficient);
 
     // Encrypt -> decrypt -> decode and compare with the original coefficients.
     heongpu::Ciphertext<Scheme> coeff_cipher(context);
@@ -64,8 +68,8 @@ int main(int argc, char* argv[])
     double max_abs_error = 0.0;
     for (std::size_t i = 0; i < coeff_message.size(); ++i)
     {
-        max_abs_error = std::max(
-            max_abs_error, std::abs(coeff_message[i] - coeff_result[i]));
+        max_abs_error = std::max(max_abs_error,
+                                 std::abs(coeff_message[i] - coeff_result[i]));
     }
 
     std::cout << "Plaintext encoding  : "

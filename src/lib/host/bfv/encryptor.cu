@@ -7,30 +7,30 @@
 
 namespace heongpu
 {
-    __host__
-    HEEncryptor<Scheme::BFV>::HEEncryptor(HEContext<Scheme::BFV> context,
-                                          Publickey<Scheme::BFV>& public_key)
+    __host__ HEEncryptor<Scheme::BFV>::HEEncryptor(
+        HEContext<Scheme::BFV> context,
+        const Publickey<Scheme::BFV>& public_key)
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = std::move(context);
+        public_key.validate_context(context_);
 
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        seed_ = gen();
-        offset_ = gen();
-
-        if (public_key.storage_type_ == storage_type::DEVICE)
+        if (public_key.storage_type_ == storage_type::device)
         {
             public_key_ = public_key.device_locations_;
         }
         else
         {
-            public_key.store_in_device();
-            public_key_ = public_key.device_locations_;
+            // The key itself stays in host memory.
+            public_key_ = DeviceVector<Data64>(public_key.host_locations_);
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(public_key_.stream()));
         }
 
         // context_ holds all parameters

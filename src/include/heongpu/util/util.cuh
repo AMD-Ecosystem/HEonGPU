@@ -21,6 +21,8 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <set>
+#include <heongpu/util/error.h>
+#include <heongpu/util/serialization_header.h>
 #include <heongpu/util/storagemanager.cuh>
 #include <gmp.h>
 
@@ -61,21 +63,102 @@ namespace heongpu
     bool coefficient_validator(const std::vector<int>& log_Q_bases_bit_sizes,
                                const std::vector<int>& log_P_bases_bit_sizes);
 
+    // Throws ParameterError unless P has at least as many bits as every key
+    // switching digit of Q: the Q primes in groups of as many primes as P
+    // has, the last group possibly smaller.
+    void validate_key_switching_digits(
+        const std::vector<int>& log_Q_bases_bit_sizes,
+        const std::vector<int>& log_P_bases_bit_sizes);
+
+    /**
+     * @brief Returns the largest total bit size of the Q and P primes that
+     * level allows for the ring size poly_modulus_degree, the limit the
+     * contexts check; 0 for sec_level_type::none and unsupported ring sizes.
+     */
+    int max_coeff_bit_count(sec_level_type level, size_t poly_modulus_degree);
+
+    // Makes sure the per-thread kernel stack size is at least `bytes`, keeping
+    // a larger limit set by the application. A smaller limit is raised when
+    // `raise` is true and reported with StateError otherwise.
+    void ensure_kernel_stack_size(size_t bytes, bool raise = true);
+
+    namespace detail
+    {
+        // Names used by the to_string() functions.
+        const char* name(sec_level_type level);
+        const char* name(storage_type type);
+        const char* name(encoding type);
+        const char* name(rescale_mode mode);
+    } // namespace detail
+
+    // Identity of an HEContext, computed from the parameters its objects
+    // depend on: the scheme, the ring size, the Q and P primes and the
+    // plaintext modulus (0 when the scheme has none). Contexts generated from
+    // the same parameters get the same identity. Never returns 0, which marks
+    // objects whose context is unknown.
+    std::uint64_t context_identity(int scheme, int ring_size,
+                                   const std::vector<Modulus64>& primes,
+                                   Data64 plain_modulus);
+
+    // Throws ContextMismatchError when an object of the context with identity
+    // `object_id` is used with `context`. Objects with identity 0 (for example
+    // ones loaded from a stream) are not checked.
+    template <typename Context>
+    void validate_context_identity(std::uint64_t object_id,
+                                   const Context& context,
+                                   const char* object_name)
+    {
+        if (object_id == 0 || !context || object_id == context->context_id())
+        {
+            return;
+        }
+        std::ostringstream stream;
+        stream << object_name << " context mismatch! The " << object_name
+               << " belongs to the context with id 0x" << std::hex << object_id
+               << " but is used with the context with id 0x"
+               << context->context_id()
+               << ". Objects can only be used with the context they were "
+                  "created with or with a context generated from the same "
+                  "parameters.";
+        throw ContextMismatchError(stream.str());
+    }
+
+    // Throws ContextMismatchError when a key with `key_digits` key switching
+    // digits is used with a context that splits Q into `context_digits`. The
+    // context identity does not tell them apart: BFV keys of parameters with
+    // more than two P primes, saved by HEonGPU 1.7.0 or earlier, have digits
+    // of two primes.
+    inline void validate_key_digit_count(int key_digits, int context_digits,
+                                         const char* object_name)
+    {
+        if (key_digits == context_digits)
+        {
+            return;
+        }
+        std::ostringstream stream;
+        stream << "The " << object_name << " has " << key_digits
+               << " key switching digits, but the context splits Q into "
+               << context_digits
+               << "! It was generated for another split of Q; generate it "
+                  "again with this context.";
+        throw ContextMismatchError(stream.str());
+    }
+
     enum class SineType
     {
-        COS1,
+        cos1,
     };
 
     enum class PolyType
     {
-        MONOMIAL,
-        CHEBYSHEV
+        monomial,
+        chebyshev
     };
 
     enum class LinearTransformType
     {
-        COEFFS_TO_SLOTS,
-        SLOTS_TO_COEFFS
+        coeffs_to_slots,
+        slots_to_coeffs
     };
 
     struct EvalModConfig
@@ -92,8 +175,8 @@ namespace heongpu
         double sqrt2pi_;
         double q_diff_;
 
-        SineType sine_type_ = SineType::COS1;
-        PolyType poly_type_ = PolyType::CHEBYSHEV;
+        SineType sine_type_ = SineType::cos1;
+        PolyType poly_type_ = PolyType::chebyshev;
 
         EvalModConfig()
             : sine_deg_(0), double_angle_(0), arcsine_deg_(0), level_start_(0),
@@ -151,7 +234,7 @@ namespace heongpu
         int piece_;
 
         EncodingMatrixConfig()
-            : lt_type_(LinearTransformType::COEFFS_TO_SLOTS), level_start_(0),
+            : lt_type_(LinearTransformType::coeffs_to_slots), level_start_(0),
               bsgs_ratio_(0.0), piece_(0)
         {
         }
@@ -166,7 +249,7 @@ namespace heongpu
             : lt_type_(lt_type), level_start_(level_start),
               bsgs_ratio_(bsgs_ratio)
         {
-            piece_ = (lt_type == LinearTransformType::COEFFS_TO_SLOTS) ? 4 : 3;
+            piece_ = (lt_type == LinearTransformType::coeffs_to_slots) ? 4 : 3;
         }
 
         EncodingMatrixConfig(LinearTransformType lt_type, int level_start,
@@ -179,20 +262,6 @@ namespace heongpu
 
     struct BootstrappingConfig
     {
-        int CtoS_piece_; // Default: 3
-        int StoC_piece_; // Default: 3
-        int taylor_number_; // Default: 11
-        bool less_key_mode_; // Default: false
-
-        BootstrappingConfig(int CtoS = 3, int StoC = 3, int taylor = 11,
-                            bool less_key_mode = false);
-
-      private:
-        void validate(); // Validates the configuration input values
-    };
-
-    struct BootstrappingConfigV2
-    {
         int CtoS_piece_;
         int StoC_piece_;
 
@@ -200,9 +269,9 @@ namespace heongpu
         EncodingMatrixConfig stc_config_;
         EvalModConfig eval_mod_config_;
 
-        BootstrappingConfigV2(EncodingMatrixConfig stc_config,
-                              EvalModConfig eval_mod_config,
-                              EncodingMatrixConfig cts_config);
+        BootstrappingConfig(EncodingMatrixConfig stc_config,
+                            EvalModConfig eval_mod_config,
+                            EncodingMatrixConfig cts_config);
     };
 
     Data64 extendedGCD(Data64 a, Data64 b, Data64& x, Data64& y);
@@ -213,6 +282,11 @@ namespace heongpu
     int calculate_bit_count(Data64 number);
     int calculate_big_integer_bit_count(Data64* number, int word_count);
 
+    /**
+     * @brief Miller-Rabin test of the odd value with num_rounds bases. The
+     * first twelve are the primes from 2 to 37, which decide every 64-bit
+     * value without error; further rounds use random bases.
+     */
     bool miller_rabin(const Data64& value, size_t num_rounds);
 
     bool is_prime(const Data64& value);
@@ -226,6 +300,30 @@ namespace heongpu
 
     std::vector<Modulus64> generate_internal_primes(size_t poly_modulus_degree,
                                                     const int prime_count);
+
+    /**
+     * @brief Returns the count largest primes p = 1 (mod 2 *
+     * poly_modulus_degree) below 2^bit_size that are not in excluded, largest
+     * first. All of them have bit_size bits, from log2(poly_modulus_degree) + 2
+     * to 61. Throws ParameterError if there are not enough of them.
+     */
+    std::vector<Data64>
+    generate_primes_below(size_t poly_modulus_degree, int bit_size,
+                          size_t count,
+                          const std::vector<Data64>& excluded = {});
+
+    /**
+     * @brief Returns the count primes p = 1 (mod 2 * poly_modulus_degree)
+     * closest to 2^bit_size that are not in excluded, alternately below and
+     * above it, starting below. The ones below have bit_size bits, the ones
+     * above bit_size + 1: the candidates for CKKS scaling primes. bit_size is
+     * from log2(poly_modulus_degree) + 2 to 60. Throws ParameterError if there
+     * are not enough of them.
+     */
+    std::vector<Data64>
+    generate_primes_around(size_t poly_modulus_degree, int bit_size,
+                           size_t count,
+                           const std::vector<Data64>& excluded = {});
 
     bool is_primitive_root(Data64 root, size_t degree, Modulus64& modulus);
 
@@ -254,22 +352,15 @@ namespace heongpu
 
     __global__ void fill_device_vector(Data64* vector, Data64 number, int size);
 
-    int find_closest_divisor(int N);
-
-    std::vector<std::vector<int>> split_array(const std::vector<int>& array,
-                                              int chunk_size);
-
-    std::vector<std::vector<int>> seperate_func(const std::vector<int>& A);
-
     std::vector<std::vector<int>> bsgs_index(const std::vector<int>& array,
                                              int N1, std::vector<int>& rot_n1,
                                              std::vector<int>& rot_n2);
 
-    std::vector<std::vector<int>> seperate_func_v2(const std::vector<int>& A,
-                                                   int slots,
-                                                   std::vector<int>& rot_n1,
-                                                   std::vector<int>& rot_n2,
-                                                   float bsgs_ratio);
+    std::vector<std::vector<int>> seperate_func(const std::vector<int>& A,
+                                                int slots,
+                                                std::vector<int>& rot_n1,
+                                                std::vector<int>& rot_n2,
+                                                float bsgs_ratio);
 
     std::vector<int> unique_sort(const std::vector<int>& input);
 

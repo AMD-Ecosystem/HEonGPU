@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -17,7 +18,7 @@ namespace heongpu
     template <typename T> class DeviceVector : public rmm::device_uvector<T>
     {
         using Dvec = rmm::device_uvector<T>;
-        using Source = rmm::mr::device_memory_resource*;
+        using Source = rmm::device_async_resource_ref;
 
       public:
         explicit DeviceVector(size_t size = 0,

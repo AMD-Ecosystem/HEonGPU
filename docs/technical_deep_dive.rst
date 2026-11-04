@@ -35,10 +35,12 @@ The NTT implementation in HEonGPU is not a direct port of CPU algorithms but a g
 Key-Switching Optimizations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Key-switching is a fundamental primitive used in operations like relinearization (after multiplication) and rotations. It is computationally expensive and has been a major focus of optimization. The library implements and compares two key-switching methods, with detailed analysis in `ePrint 2025/124 <https://eprint.iacr.org/2025/124>`_:
+Key-switching is a fundamental primitive used in operations like relinearization (after multiplication) and rotations. It is computationally expensive and has been a major focus of optimization. Two key-switching methods are analyzed in `ePrint 2025/124 <https://eprint.iacr.org/2025/124>`_:
 
-* **Method I (Fan-Vercauteren)**: The classical approach.
-* **Method II (Hybrid Key Switching)**: Reduces the number of NTTs and Hadamard products compared to Method I, at the cost of extra base conversion operations. This method is generally faster on GPUs where the NTT acceleration is significant.
+* **Method I (Fan-Vercauteren)**: The classical approach: every prime of the ciphertext modulus is one digit of the decomposition.
+* **Method II (Hybrid Key Switching)**: Groups the primes into digits of several primes, which reduces the number of NTTs and Hadamard products compared to Method I, at the cost of extra base conversion operations. This method is generally faster on GPUs where the NTT acceleration is significant.
+
+Method I is Method II with digits of one prime, so HEonGPU implements one hybrid key switching. The digits have as many primes as the P modulus; with one P prime this is Method I, with the kernels specialized for it.
 
 Memory Management with RAPIDS Memory Manager (RMM)
 ----------------------------------------------------
@@ -46,7 +48,7 @@ Memory Management with RAPIDS Memory Manager (RMM)
 To handle the frequent allocation and deallocation of large memory blocks for ciphertexts and keys, HEonGPU integrates the **RAPIDS Memory Manager (RMM)**.
 
 * **Memory Pooling**: Instead of making expensive `cudaMalloc` and `cudaFree` calls for every object, RMM is used to create a large memory pool on the GPU at initialization (`rmm::pool_memory_resource`). Subsequent allocations are then serviced rapidly from this pool, reducing overhead and memory fragmentation.
-* **Pinned Host Memory**: For the CPU-side memory pool, `rmm::pinned_memory_resource` is used. Pinned memory is non-pageable and allows for much faster, asynchronous data transfers between the host and device.
+* **Pinned Host Memory**: For the CPU-side memory pool, `rmm::mr::pinned_host_memory_resource` is used. Pinned memory is non-pageable and allows for much faster, asynchronous data transfers between the host and device.
 * **Custom Vector Types**: The library uses custom vector classes, `heongpu::DeviceVector` and `heongpu::HostVector`, which are integrated with the RMM memory pools to provide a standard C++ vector-like interface while benefiting from the optimized memory management backend.
 
 Decomposition of Homomorphic Operations

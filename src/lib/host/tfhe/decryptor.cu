@@ -1,4 +1,5 @@
-﻿// Copyright 2024-2026 Alişah Özcan
+// Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -7,18 +8,29 @@
 
 namespace heongpu
 {
-    __host__
-    HEDecryptor<Scheme::TFHE>::HEDecryptor(HEContext<Scheme::TFHE> context,
-                                           Secretkey<Scheme::TFHE>& secret_key)
+    __host__ HEDecryptor<Scheme::TFHE>::HEDecryptor(
+        HEContext<Scheme::TFHE> context,
+        const Secretkey<Scheme::TFHE>& secret_key)
     {
         if (!context)
         {
-            throw std::invalid_argument("HEContext is not set!");
+            throw ParameterError("HEContext is not set! Pass a context "
+                                 "created with GenHEContext.");
         }
 
         context_ = std::move(context);
 
-        lwe_key_device_location_ = secret_key.lwe_key_device_location_;
+        secret_key.validate_context(context_);
+        if (!secret_key.secret_key_generated_)
+            throw StateError("Secretkey is not generated! Call "
+                             "HEKeyGenerator::generate_secret_key first.");
+        if (secret_key.is_on_device())
+            lwe_key_device_location_ = secret_key.lwe_key_device_location_;
+        else
+            lwe_key_device_location_ =
+                DeviceVector<int32_t>(secret_key.lwe_key_host_location_);
+        HEONGPU_CUDA_CHECK(
+            cudaStreamSynchronize(lwe_key_device_location_.stream()));
     }
 
     __host__ void
@@ -32,7 +44,12 @@ namespace heongpu
 
         DeviceVector<int32_t> messages_gpu(ciphertext.shape_, stream);
 
-        decrypt_lwe_kernel<<<block_count, THREADS, smem>>>(
+        if (block_count == 0)
+        {
+            messages.clear();
+            return;
+        }
+        decrypt_lwe_kernel<<<block_count, THREADS, smem, stream>>>(
             lwe_key_device_location_.data(),
             ciphertext.a_device_location_.data(),
             ciphertext.b_device_location_.data(), messages_gpu.data(),
@@ -40,9 +57,11 @@ namespace heongpu
         HEONGPU_CUDA_CHECK(cudaGetLastError());
 
         std::vector<int32_t> messages_encoded(ciphertext.shape_);
-        cudaMemcpy(messages_encoded.data(), messages_gpu.data(),
-                   ciphertext.shape_ * sizeof(int32_t), cudaMemcpyDeviceToHost);
-        HEONGPU_CUDA_CHECK(cudaGetLastError());
+        HEONGPU_CUDA_CHECK(cudaMemcpyAsync(messages_encoded.data(),
+                                           messages_gpu.data(),
+                                           ciphertext.shape_ * sizeof(int32_t),
+                                           cudaMemcpyDeviceToHost, stream));
+        HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         messages.resize(ciphertext.shape_);
         for (int i = 0; i < ciphertext.shape_; i++)

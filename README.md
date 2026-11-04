@@ -38,7 +38,7 @@ For more information about HEonGPU:
 The HEonGPU library now delivers `Collective Bootstrapping` for both BFV and CKKS, drawing on the designs introduced by [Mouchet et al.](https://eprint.iacr.org/2020/304.pdf)  and [Balle et al.](https://arxiv.org/pdf/2009.00349) A streamlined CUDA path merges share creation and re-encryption into a single launch, allowing deep multi-party workloads to keep running entirely on the GPU without pausing to reset noise.
 
 
-### 🚨 **New Scheme: [TFHE (Torus Fully Homomorphic Encryption)](example/basic/13_basic_tfhe.cpp)**
+### 🚨 **New Scheme: [TFHE (Torus Fully Homomorphic Encryption)](example/basic/15_basic_tfhe.cpp)**
 
 The HEonGPU library now includes support for the `TFHE` (Torus Fully Homomorphic Encryption) scheme with GPU acceleration. This enables efficient evaluation of Boolean circuits using fast gate bootstrapping and low-latency parallel execution on modern CUDA-enabled GPUs.
 
@@ -96,31 +96,181 @@ The Logic Operations supported:
 
 ### Execution times of the HEonGPU Bootstrapping Operations (on RTX 4090)
 
-| Bootstrapping Type   | N    | Slot Count| LKM | Remaining Level | Total Time | Amortized Time |
-|:--------------------:|:----:|:----:|:---:|:---------------:|:----------:|:--------------:|
-| **Slim Bootstrapping**    | 2^16 | 2^15 | ON  | 0 Level        | 99.12 ms   | 3.02 µs        |
-|                      | 2^16 | 2^15 | ON  | 2 Level        | 114.13 ms  | 3.48 µs        |
-|                      | 2^16 | 2^15 | ON  | 4 Level        | 164.20 ms  | 5.01 µs        |
-| **Bit Bootstrapping**     | 2^15 | 2^14 | OFF | 0 Level        | 33.74 ms   | 2.06 µs        |
-|                      | 2^15 | 2^14 | OFF | 2 Level        | 39.36 ms   | 2.40 µs        |
-|                      | 2^15 | 2^14 | OFF | 4 Level        | 46.54 ms   | 2.84 µs        |
-|                      | 2^15 | 2^14 | OFF | 6 Level        | 55.66 ms   | 3.40 µs        |
-|                      | 2^16 | 2^15 | OFF | 0 Level        | 86.69 ms   | 2.73 µs        |
-|                      | 2^16 | 2^15 | OFF | 2 Level        | 100.72 ms  | 3.07 µs        |
-|                      | 2^16 | 2^15 | OFF | 4 Level        | 115.88 ms  | 3.53 µs        |
-| **Gate Bootstrapping***    | 2^15 | 2^14 | OFF | 0 Level        | 27.03 ms   | 1.64 µs        |
-|                      | 2^16 | 2^15 | OFF | 0 Level        | 70.73 ms   | 2.16 µs        |
+<table>
+  <tr>
+    <th>Bootstrapping Type</th>
+    <th>N</th>
+    <th>Slot Count</th>
+    <th>Remaining Level</th>
+    <th>Total Time</th>
+    <th>Amortized Time</th>
+    <th>Precision (bits)</th>
+  </tr>
+  <tr>
+    <td rowspan="1"><b>Regular Bootstrapping</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>9 Level</td>
+    <td>109.28 ms</td>
+    <td>3.33 µs</td>
+    <td>17.95</td>
+  </tr>
+  <tr>
+    <td rowspan="3"><b>Slim Bootstrapping</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>0 Level</td>
+    <td>38.55 ms</td>
+    <td>1.18 µs</td>
+    <td>20.47</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>9 Level</td>
+    <td>70.59 ms</td>
+    <td>2.15 µs</td>
+    <td>20.47</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>15 Level</td>
+    <td>94.58 ms</td>
+    <td>2.89 µs</td>
+    <td>20.47</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><b>Bit Bootstrapping</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>0 Level</td>
+    <td>50.72 ms</td>
+    <td>1.55 µs</td>
+    <td>27.40</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>8 Level</td>
+    <td>82.43 ms</td>
+    <td>2.52 µs</td>
+    <td>27.40</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><b>Gate Bootstrapping*</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>0 Level</td>
+    <td>62.90 ms</td>
+    <td>1.92 µs</td>
+    <td>27.66</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>7 Level</td>
+    <td>99.45 ms</td>
+    <td>3.04 µs</td>
+    <td>27.67</td>
+  </tr>
+</table>
 </div>
-LKM: Less Key Mode is a bootstrapping optimization in HEonGPU. Its purpose is to reduce the required amount of Galois keys by 30% while sacrificing 15–20% performance. This is useful in cases where GPU memory is insufficient.
-
-*: For all gates
 
 
+<div align="center">
+
+### Execution times of the HEonGPU Bootstrapping Operations (on RTX 5090)
+
+<table>
+  <tr>
+    <th>Bootstrapping Type</th>
+    <th>N</th>
+    <th>Slot Count</th>
+    <th>Remaining Level</th>
+    <th>Total Time</th>
+    <th>Amortized Time</th>
+    <th>Precision (bits)</th>
+  </tr>
+  <tr>
+    <td rowspan="1"><b>Regular Bootstrapping</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>9 Level</td>
+    <td>63.51 ms</td>
+    <td>1.94 µs</td>
+    <td>17.94</td>
+  </tr>
+  <tr>
+    <td rowspan="3"><b>Slim Bootstrapping</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>0 Level</td>
+    <td>23.92 ms</td>
+    <td>0.73 µs</td>
+    <td>20.47</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>9 Level</td>
+    <td>40.03 ms</td>
+    <td>1.22 µs</td>
+    <td>20.48</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>15 Level</td>
+    <td>56.45 ms</td>
+    <td>1.72 µs</td>
+    <td>20.58</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><b>Bit Bootstrapping</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>0 Level</td>
+    <td>35.70 ms</td>
+    <td>1.09 µs</td>
+    <td>27.40</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>8 Level</td>
+    <td>52.13 ms</td>
+    <td>1.59 µs</td>
+    <td>27.40</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><b>Gate Bootstrapping*</b></td>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>0 Level</td>
+    <td>40.35 ms</td>
+    <td>1.23 µs</td>
+    <td>27.67</td>
+  </tr>
+  <tr>
+    <td>2<sup>16</sup></td>
+    <td>2<sup>15</sup></td>
+    <td>7 Level</td>
+    <td>59.50 ms</td>
+    <td>1.82 µs</td>
+    <td>27.67</td>
+  </tr>
+</table>
+</div>
+
+Dense secret key (h=192) with a temporary sparse secret key (h=32), median of 5 runs. Remaining Level is the number of levels left before the next bootstrapping.
+
+*: Timing is for all gates; precision is measured using the AND example.
 
 ### 🚨 **New Feature: [CKKS Regular Bootstrapping](example/bootstrapping/README.md)**
 
 HEonGPU now includes support for `CKKS Regular` Bootstrapping, enabling efficient evaluation of deep computational circuits with high precision and security. On an NVIDIA RTX 4090, it performs `CKKS` Regular Bootstrapping for 
-N=65536 in under 170 ms.
+N=65536 in about 110 ms.
 
 ### 🚨 **New Feature: [Multiparty Computation (MPC) Support](example/mpc/README.md)**
 
@@ -130,13 +280,16 @@ HEonGPU now includes support for **Multiparty Computation (MPC)** protocols, pro
 
 ### Requirements
 
-- [CMake](https://cmake.org/download/) >=3.30.4
-- [GCC](https://gcc.gnu.org/)
+- [CMake](https://cmake.org/download/) >=4.0
+- [GCC](https://gcc.gnu.org/) with C++20 support (tested with GCC 11.4)
 - [GMP](https://gmplib.org/)
-- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=11.4 (NVIDIA GPUs)
+- [NTL](https://libntl.org/)
+- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=12.8 (NVIDIA GPUs)
 - [ROCm](https://rocm.docs.amd.com/) >=7.2 (AMD GPUs)
-- [OpenSSL](https://www.openssl.org/) >= 1.1.0
+- [OpenSSL](https://www.openssl.org/) >= 1.1.1
 - [ZLIB](https://zlib.net/)
+
+On Ubuntu: `sudo apt install libgmp-dev libntl-dev libssl-dev zlib1g-dev`.
 
 ### Third-Party Dependencies
 - [GPU-NTT](https://github.com/Alisah-Ozcan/GPU-NTT)
@@ -145,8 +298,8 @@ HEonGPU now includes support for **Multiparty Computation (MPC)** protocols, pro
 - [RMM](https://github.com/rapidsai/rmm)
 - [GoogleTest](https://github.com/google/googletest)
 
-HEonGPU automatically handle third-party dependencies like GPU-NTT, GPU-FFT, RMM, GoogleTest.
-Default CUDA architectures: `80;86;89;90`. Override with `-D CMAKE_CUDA_ARCHITECTURES=<...>` if needed.
+HEonGPU builds GPU-NTT, GPU-FFT and RNGonGPU from its git submodules. It downloads RMM unless `HEonGPU_USE_SYSTEM_RMM` is set, and GoogleTest unless an installed one is found.
+Without `CMAKE_CUDA_ARCHITECTURES` (or the `CUDAARCHS` environment variable), HEonGPU builds for the architecture of the first GPU of the machine. Set `-D CMAKE_CUDA_ARCHITECTURES=<...>` to build for other or several GPUs.
 
 ### Build & Install
 
@@ -159,20 +312,34 @@ To build and install HEonGPU, follow the steps below. This includes configuring 
 | Volta  | 70, 72 |
 | Turing | 75 |
 | Ampere | 80, 86 |
-| Ada	 | 89, 90 |
+| Ada Lovelace | 89 |
+| Hopper | 90 |
+| Blackwell | 100, 120 |
 
 </div>
 
 ```bash
+$ git clone --recursive https://github.com/Alisah-Ozcan/HEonGPU.git
+$ cd HEonGPU
 $ cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 $ cmake --build ./build/
 $ sudo cmake --install build
 ```
+GPU-NTT, GPU-FFT and RNGonGPU are git submodules. If the repository was cloned without `--recursive`, fetch them with `git submodule update --init --recursive`.
+
+Configuring downloads RMM, and GoogleTest when the tests are enabled and no installed GoogleTest is found. To build without network access, install RMM 26.08 (and GoogleTest for the tests), pass their location with `-D CMAKE_PREFIX_PATH=<dir>` and set `-D HEonGPU_USE_SYSTEM_RMM=ON`.
+
+When HEonGPU builds RMM from source, installing HEonGPU also installs this RMM (with CCCL, rapids_logger and nvtx3), because the installed HEonGPU needs it. If another RMM version is installed at the same prefix, configuring warns that it would be replaced. Two options control this:
+- `-D HEonGPU_USE_SYSTEM_RMM=ON`: use an installed RMM 26.08 and fail if there is none, never download RMM.
+- `-D HEonGPU_INSTALL_RMM=OFF`: do not install the RMM built from source. Projects that use the installed HEonGPU then need to provide RMM 26.08 themselves.
+
 Available build types: `Debug`, `Release` (default), `RelWithDebInfo`, `MinSizeRel`. Override with `-D CMAKE_BUILD_TYPE=<type>`. These propagate to all bundled libraries (GPU-FFT, GPU-NTT, RNGonGPU).
+
+The default install prefix is `/usr/local`. To install somewhere else, for example without `sudo`, set it when configuring (`-D CMAKE_INSTALL_PREFIX=<dir>`) or when installing (`cmake --install build --prefix <dir>`), and pass the same directory to your project with `-D CMAKE_PREFIX_PATH=<dir>`. The installed package can be moved to another directory afterwards.
 
 #### AMD GPUs (ROCm)
 
-Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by hipMM (https://github.com/AMD-Ecosystem/hipMM), the ROCm-DS port of RMM, which keeps RMM's API.
+Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by hipMM (https://github.com/AMD-Ecosystem/hipMM), the ROCm-DS port of RMM, which keeps RMM's API. The RMM options above then apply to hipMM, which has its own version numbers (4.0).
 
 <div align="center">
 
@@ -193,7 +360,7 @@ $ sudo cmake --install build
 
 `CMAKE_HIP_ARCHITECTURES` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card.
 
-On an AMD GPU that shares its memory with the system, such as an APU, the default device memory pool takes 90% of the memory the runtime reports as available, and on such a part that is most of the whole machine rather than of a dedicated card; context creation and memory-heavy work slow down noticeably. Choose a smaller initial device pool at runtime, sized for what the application needs, as shown under Memory Pool Configuration (Runtime) below. Discrete cards keep the default, where reserving most of the dedicated VRAM is cheap.
+On an AMD GPU that shares its memory with the system, such as an APU, the default device memory pool takes 50% of the memory the runtime reports as available, and on such a part that is half of the whole machine rather than of a dedicated card. Choose a smaller initial device pool at runtime, sized for what the application needs, as shown under Memory Pool Configuration (Runtime) below. Discrete cards keep the default, where reserving half of the dedicated VRAM is cheap.
 
 ### Uninstall
 
@@ -250,19 +417,58 @@ $ Example: ./build/bin/examples/1_basic_bfv
 
 ### Toy Example
 
+`HESession` holds one party's whole computation: the context of the parameters, the keys and the operators.
+
+```c++
+#include <heongpu/heongpu.hpp>
+
+int main() {
+    // Parameters for one multiplication in a row with a 20 bit plaintext
+    // modulus at 128-bit security.
+    heongpu::HEParams<heongpu::Scheme::BFV> params;
+    params.multiplicative_depth = 1;
+    heongpu::HESession<heongpu::Scheme::BFV> session(params);
+
+    std::vector<uint64_t> message(session.slot_count(), 8ULL);
+    auto C1 = session.encrypt(message);
+    auto C2 = C1 + C1;
+    std::vector<uint64_t> result = session.decrypt(C2);
+
+    return 0;
+}
+```
+
+A CKKS session made from a bootstrapping preset bootstraps its ciphertexts, and a session saved with the keys of the evaluator computes on a server without the secret key:
+
+```c++
+heongpu::HESession<heongpu::Scheme::CKKS> session(
+    heongpu::CKKSBootstrappingPreset::regular(10));  // 10 levels between bootstrappings
+auto x = session.encrypt(values);
+for (int i = 0; i < 30; i++) {
+    if (x.levels_left() < 2)
+        x = x.bootstrap();
+    x = 0.5 * x * x + 0.25;
+}
+
+session.save(keys, heongpu::session_role::evaluator);  // without the secret key
+auto server = heongpu::HESession<heongpu::Scheme::CKKS>::load(
+    keys, heongpu::session_role::evaluator);
+```
+
+The same BFV computation with the lower level API, whose objects give full control over the keys, the CUDA streams and the memory of every operation:
+
 ```c++
 #include <heongpu/heongpu.hpp>
 
 int main() {   
-    heongpu::HEContext<heongpu::Scheme::BFV> context =
-        heongpu::GenHEContext<heongpu::Scheme::BFV>();
-
-    size_t poly_modulus_degree = 8192;
-    context.set_poly_modulus_degree(poly_modulus_degree);
-    context.set_coeff_modulus_default_values(1);
-    int plain_modulus = 1032193;
-    context.set_plain_modulus(plain_modulus);
-    context.generate();
+    // Parameters for one multiplication in a row with a 20 bit plaintext
+    // modulus at 128-bit security.
+    heongpu::HEParams<heongpu::Scheme::BFV> params;
+    params.multiplicative_depth = 1;
+    params.plain_modulus_bit_size = 20;
+    heongpu::HEContext<heongpu::Scheme::BFV> context = params.make_context();
+    context->generate();
+    size_t poly_modulus_degree = context->get_poly_modulus_degree();
 
     heongpu::HEKeyGenerator<heongpu::Scheme::BFV> keygen(context);
     heongpu::Secretkey<heongpu::Scheme::BFV> secret_key(context);
@@ -295,6 +501,7 @@ int main() {
 }
 ```
 
+
 ## Configuration Header ([define.h](src/include/heongpu/kernel/defines.h))
 
 The [define.h](src/include/heongpu/kernel/defines.h) file is an essential configuration file for HEonGPU, containing key settings that define the library's limits and capabilities, including polynomial degrees, modulus bit-lengths, and memory pool sizes. 
@@ -306,14 +513,19 @@ Features in [define.h](src/include/heongpu/kernel/defines.h):
 
 - **Maximum BFV Auxiliary Base Count:** `MAX_BSK_SIZE` (64) sets the maximum size for the BFV auxiliary base.
 
-- **Galois Key Capability:** `MAX_SHIFT` (8) controls the maximum rotation capability for Galois keys. __Don't forget to change it if you need more rotation steps(for default galois key generation)__.
+- **Galois Key Capability:** `MAX_SHIFT` (8) sets the rotation range of the default Galois keys, `Galoiskey(context)`. To use another range without rebuilding the library, construct the key with `Galoiskey(context, max_shift)`.
 
 - **Device**:
-  - Initial size (`0.9`): 90% of available GPU memory.
+  - Initial size (`0.5`): 50% of available GPU memory.
   - Max size (`0.95`): 95% of available GPU memory.
 - **Host**:
   - Initial size (default): 100 MB when no runtime config is provided.
   - Max size (`0.4`): 40% of available CPU memory.
+
+The device pool grows on demand from the initial size up to the max size, so the
+initial size only decides how much memory is reserved up front. The default leaves
+room for other processes on the same GPU; to reserve more (or less) memory up front,
+set `initial_device_fraction` or `initial_device_bytes` in `MemoryPoolConfig` (see below).
 
 If your system allows, you can redefine the memory pool sizes to better suit your use case.
 
@@ -324,11 +536,9 @@ a context. Sizes can be given as **percentages** (0.0-1.0 or 0-100) or as
 **absolute bytes**. If you do not provide a config, the defaults above are used.
 
 ```cpp
-heongpu::HEContext<heongpu::Scheme::CKKS> context =
-    heongpu::GenHEContext<heongpu::Scheme::CKKS>();
-
-context.set_poly_modulus_degree(8192);
-context.set_coeff_modulus_bit_sizes({60, 30, 30, 30}, {60});
+heongpu::HEParams<heongpu::Scheme::CKKS> params;
+params.multiplicative_depth = 3;
+heongpu::HEContext<heongpu::Scheme::CKKS> context = params.make_context();
 
 heongpu::MemoryPoolConfig pool_config;
 pool_config.initial_device_fraction = 80.0f; // %80 (0.8f is also valid)
@@ -336,11 +546,18 @@ pool_config.max_device_fraction = 90.0f;     // %90
 pool_config.initial_host_bytes = 256ULL * 1024 * 1024; // 256 MB
 pool_config.max_host_fraction = 50.0f;                 // %50
 
-context.generate(pool_config);
+context->generate(pool_config);
 ```
 
 > Note: The memory pool is a process-wide singleton. The **first**
-> initialization sets the pool sizes; subsequent contexts reuse the same pool.
+> initialization that enables the pool sets the pool sizes; subsequent contexts
+> reuse the same pool. `use_memory_pool` is also process-wide: the most recently
+> generated context decides whether new allocations use the pool, and buffers
+> are always returned to the resource they were allocated from.
+
+HEonGPU allocates from its own memory resource and does not change the process-wide RMM default, so other code in the process that uses RMM (for example RAPIDS libraries) keeps its own allocations. Set `pool_config.set_as_rmm_default = true` to make HEonGPU's pool the RMM default as well; the previous default is restored when a later context turns it off, and at exit.
+
+`generate()` also raises the CUDA kernel stack size limit (`cudaLimitStackSize`) to the 2048 bytes HEonGPU's kernels need, if it is lower. Set `pool_config.raise_kernel_stack_size = false` to manage the limit yourself; `generate()` then throws if it is too low. `heongpu::initialize(config)` sets up the memory pool and the other process-wide state explicitly, and `heongpu::shutdown()` releases them once all HEonGPU objects are destroyed, so that they can be set up again with another configuration. See the documentation (Advanced Topics, Process-Wide State) for all process-wide state of HEonGPU.
 
 
 ## Storage Management
@@ -349,47 +566,20 @@ In HEonGPU, Fully Homomorphic Encryption (FHE) operations rely on an efficient s
 
 ### How Storage Management Works
 
-The `ExecutionOptions` struct in HEonGPU determines how input data is handled during and after GPU computations. Specifically:
+Objects can be stored in host or device memory, and the operations take them from either. The `ExecutionOptions` struct sets where the results go:
 
-- `set_storage_type`: Defines where the output data should reside after the operation (`DEVICE` or `HOST`).
-
-- `set_initial_location`: Determines whether the input data should return to its original location after the computation.
+- `set_storage_type`: where the output of an operation is stored (`storage_type::device` or `storage_type::host`), and where the object an `*_inplace` operation changes ends up.
 
 ```c++
 // ...
 ExecutionOptions options;
-options.set_storage_type(storage_type::DEVICE)
-       .set_initial_location(true);
+options.set_storage_type(storage_type::device);
 
 operators.add(input1, input2, output, options);
 // ...
 ```
 
-- Simple case:
-  - If `input1` and `input2` are initially on the `HOST`, they will be copied to the `DEVICE` for the computation.
-  - After the operation, since `set_initial_location(true)` is specified, both `input1` and `input2` will return to the `HOST`.
-  - The `output` will remain on the `DEVICE`, as specified by `set_storage_type(storage_type::DEVICE)`.
-
-- All case:
-
-<div align="center">
-
-| `set_storage_type` | `set_initial_location` | Input Locations (Before)            | Input Locations (After)             | Output Location After Computation |
-|:------------------:|:----------------------:|:-----------------------------------:|:-----------------------------------:|:---------------------------------:|
-| `DEVICE`           | `true`                | `input1: HOST, input2: HOST`        | `input1: HOST, input2: HOST`        | `DEVICE`                             |
-| `DEVICE`           | `false`               | `input1: HOST, input2: HOST`        | `input1: DEVICE, input2: DEVICE`    | `DEVICE`                             |
-| `DEVICE`           | `true`                | `input1: HOST, input2: DEVICE`      | `input1: HOST, input2: DEVICE`      | `DEVICE`                             |
-| `DEVICE`           | `false`               | `input1: HOST, input2: DEVICE`      | `input1: DEVICE, input2: DEVICE`    | `DEVICE`                             |
-| `DEVICE`           | `true`                | `input1: DEVICE, input2: DEVICE`    | `input1: DEVICE, input2: DEVICE`    | `DEVICE`                             |
-| `DEVICE`           | `false`               | `input1: DEVICE, input2: DEVICE`    | `input1: DEVICE, input2: DEVICE`    | `DEVICE`                             |
-| `HOST`             | `true`                | `input1: HOST, input2: HOST`        | `input1: HOST, input2: HOST`        | `HOST`                               |
-| `HOST`             | `false`               | `input1: HOST, input2: HOST`        | `input1: DEVICE, input2: DEVICE`    | `HOST`                               |
-| `HOST`             | `true`                | `input1: HOST, input2: DEVICE`      | `input1: HOST, input2: HOST`        | `HOST`                               |
-| `HOST`             | `false`               | `input1: HOST, input2: DEVICE`      | `input1: DEVICE, input2: DEVICE`    | `HOST`                               |
-| `HOST`             | `true`                | `input1: DEVICE, input2: DEVICE`    | `input1: DEVICE, input2: DEVICE`    | `HOST`                               |
-| `HOST`             | `false`               | `input1: DEVICE, input2: DEVICE`    | `input1: DEVICE, input2: DEVICE`    | `HOST`                               |
-
-</div>
+The inputs of an operation are taken by `const` reference and never change: an input in host memory is read from a temporary copy on the device and stays in host memory. To keep an input on the device for later operations, move it there once with `store_in_device()`. `set_initial_location` only applies to the object an `*_inplace` operation changes.
 
 ## Using HEonGPU in a downstream CMake project
 
@@ -408,6 +598,39 @@ set_target_properties(<your-target> PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ...
 ```
 
+This applies to the default static library (`libheongpu.a`), which leaves the CUDA device link to your project.
+
+HEonGPU can also be built as a shared library with `-D HEonGPU_BUILD_SHARED=ON` (`libheongpu.so`). The shared library does its own device link, so your project does not need to enable CUDA or separable compilation, and all libraries in a process that use it share one HEonGPU, including its memory pool:
+
+```cmake
+project(<your-project> LANGUAGES CXX)
+find_package(HEonGPU)
+target_link_libraries(<your-target> PRIVATE HEonGPU::heongpu)
+```
+
+The shared library is versioned with the major and minor version (for example `libheongpu.so.1.4`), because its ABI can change between minor versions. Its kernels are internal and cannot be launched from outside the library.
+
+## Versioning and Compatibility
+
+HEonGPU follows [semantic versioning](https://semver.org/):
+- **Major versions** (2.0, 3.0, ...) can change or remove APIs.
+- **Minor versions** (1.4, 1.5, ...) add features without breaking code that compiles against the previous minor version. They can change the ABI, so rebuild code that uses HEonGPU; the shared library is versioned accordingly (`libheongpu.so.1.4`).
+- **Patch versions** (1.4.1, ...) fix bugs without changing the API or the ABI.
+
+APIs that will be removed are first marked `[[deprecated]]`, with the replacement in the warning, for at least one minor version, and removed in the next major version. HEonGPU 2.0 removed the APIs deprecated in 1.x; the documentation (Advanced Topics) lists them with their replacements.
+
+Serialized data stays readable: HEonGPU 2.0 reads the data written by every 1.x version, and HEonGPU 1.3 and later read the data written by 2.0. HEonGPU 2.0 writes the format version 2 only; data of the format version 1, written by HEonGPU 1.2 and earlier, can still be loaded.
+
+Supported toolchain: CUDA 12.8 or newer, a C++20 compiler (tested with GCC 11.4) and CMake 4.0 or newer.
+
+### Thread safety
+- A generated context is not changed afterwards and can be shared by threads.
+- Keys and operators can be shared by threads that run operations on their own ciphertexts and plaintexts and their own CUDA streams, as the multi-stream examples do.
+- Operations do not change their inputs, so threads can share them. An object that an operation writes, or that is moved between host and device memory, must not be used by another thread at the same time.
+- An `HESession` and its copies can be used by several threads, each on its own CUDA stream with `session.on_stream(stream)`. A rotation by a step that has no key yet generates the key while the other rotations of the session wait.
+- The memory pool is thread-safe. Call `heongpu::initialize()` and `heongpu::shutdown()` while no other thread uses HEonGPU.
+- Key generation, encryption and multiparty computation can run from several threads. They draw from one process-wide random number generator. It takes one request at a time on the host but does not wait for the GPU, so the GPU work of requests on different CUDA streams runs concurrently. The numbers of a seed, as the common polynomials of multiparty computation, are drawn without other threads drawing in between and are the same on every GPU and every kind of CUDA stream.
+
 ## How to Cite HEonGPU
 
 Please use the below BibTeX, to cite HEonGPU in academic papers.
@@ -424,7 +647,7 @@ Please use the below BibTeX, to cite HEonGPU in academic papers.
 
 Please use the below BibTeX, to cite key-switching optimizations in academic papers.
 
-Note: `heongpu::keyswitching_type::KEYSWITCHING_METHOD_III` is available only in release [`v1.1.3`](https://github.com/Alisah-Ozcan/HEonGPU/releases/tag/v1.1.3) and earlier.
+Note: the key switching method of this paper is available only in release [`v1.1.3`](https://github.com/Alisah-Ozcan/HEonGPU/releases/tag/v1.1.3) and earlier.
 
 ```
 @misc{cryptoeprint:2025/124,
@@ -443,3 +666,9 @@ This project is licensed under the [Apache License](LICENSE). For more details, 
 If you have any questions or feedback, feel free to contact me: 
 - Email: alisah@sabanciuniv.edu
 - LinkedIn: [Profile](https://www.linkedin.com/in/ali%C5%9Fah-%C3%B6zcan-472382305/)
+
+<div align="center">
+
+![enCRYPTON-Labs logo](./figures/encrypton_labs_amblem.png)
+
+</div>

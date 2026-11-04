@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -98,7 +99,9 @@ namespace heongpu
             t_ -= 1;
             m <<= 1;
 
-            in_shared_address = ((idx_x >> t_) << t_) + idx_x;
+            __syncwarp();
+            if (lp < 5)
+                in_shared_address = ((idx_x >> t_) << t_) + idx_x;
         }
         __syncthreads();
     }

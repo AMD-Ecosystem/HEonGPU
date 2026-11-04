@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -59,11 +60,13 @@ constexpr auto Scheme = heongpu::Scheme::CKKS;
 
 int main(int argc, char* argv[])
 {
-    // 2. Set up HE context (BFV scheme with key-switching METHOD_I)
-    heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
+    // 2. Set up HE context (CKKS scheme)
+    heongpu::HEParams<Scheme> params;
     const size_t poly_modulus_degree = 8192;
-    context->set_poly_modulus_degree(poly_modulus_degree);
-    context->set_coeff_modulus_bit_sizes({60, 30, 30, 30}, {60});
+    params.poly_modulus_degree = poly_modulus_degree;
+    params.coeff_modulus_bit_sizes = {60, 30, 30, 30};
+    params.special_modulus_bit_sizes = {60};
+    heongpu::HEContext<Scheme> context = params.make_context();
 
     double scale = pow(2.0, 30);
 
@@ -147,7 +150,7 @@ int main(int argc, char* argv[])
     operators.multiply_inplace(cipher2, cipher2);
     operators.relinearize_inplace(cipher2, relin_key2);
     operators.rescale_inplace(cipher2);
-    operators.rotate_rows_inplace(cipher2, galois_key2, 3);
+    operators.rotate_inplace(cipher2, galois_key2, 3);
 
     // 13. Decrypt and display result
     heongpu::Plaintext<Scheme> plain_result(loaded_context);

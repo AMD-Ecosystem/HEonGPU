@@ -4,10 +4,92 @@
 // Developer: Alişah Özcan
 
 #include <heongpu/util/util.cuh>
+#include <heongpu/util/secstdparams.h>
+#include <algorithm>
 #include <map>
 
 namespace heongpu
 {
+    namespace detail
+    {
+        const char* name(sec_level_type level)
+        {
+            switch (level)
+            {
+                case sec_level_type::none:
+                    return "none";
+                case sec_level_type::sec128:
+                    return "sec128";
+                case sec_level_type::sec192:
+                    return "sec192";
+                case sec_level_type::sec256:
+                    return "sec256";
+            }
+            return "unknown";
+        }
+
+        const char* name(storage_type type)
+        {
+            switch (type)
+            {
+                case storage_type::host:
+                    return "host";
+                case storage_type::device:
+                    return "device";
+            }
+            return "unknown";
+        }
+
+        const char* name(encoding type)
+        {
+            switch (type)
+            {
+                case encoding::slot:
+                    return "slot";
+                case encoding::coefficient:
+                    return "coefficient";
+            }
+            return "unknown";
+        }
+
+        const char* name(rescale_mode mode)
+        {
+            switch (mode)
+            {
+                case rescale_mode::manual:
+                    return "manual";
+                case rescale_mode::automatic:
+                    return "automatic";
+            }
+            return "unknown";
+        }
+    } // namespace detail
+
+    std::uint64_t context_identity(int scheme, int ring_size,
+                                   const std::vector<Modulus64>& primes,
+                                   Data64 plain_modulus)
+    {
+        // 64-bit FNV-1a over the little-endian bytes of each parameter.
+        std::uint64_t hash = 0xcbf29ce484222325ULL;
+        auto add = [&](std::uint64_t value)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                hash ^= (value >> (8 * i)) & 0xFF;
+                hash *= 0x100000001b3ULL;
+            }
+        };
+        add(static_cast<std::uint64_t>(scheme));
+        add(static_cast<std::uint64_t>(ring_size));
+        add(primes.size());
+        for (const Modulus64& prime : primes)
+        {
+            add(prime.value);
+        }
+        add(plain_modulus);
+        return (hash == 0) ? 1 : hash;
+    }
+
     bool coefficient_validator(const std::vector<int>& log_Q_bases_bit_sizes,
                                const std::vector<int>& log_P_bases_bit_sizes)
     {
@@ -53,6 +135,40 @@ namespace heongpu
         }
 
         return true;
+    }
+
+    void
+    validate_key_switching_digits(const std::vector<int>& log_Q_bases_bit_sizes,
+                                  const std::vector<int>& log_P_bases_bit_sizes)
+    {
+        const int P_size = static_cast<int>(log_P_bases_bit_sizes.size());
+        int P_bits = 0;
+        for (int bits : log_P_bases_bit_sizes)
+        {
+            P_bits += bits;
+        }
+
+        const int Q_size = static_cast<int>(log_Q_bases_bit_sizes.size());
+        for (int first = 0; first < Q_size; first += P_size)
+        {
+            const int last = std::min(first + P_size, Q_size) - 1;
+            int digit_bits = 0;
+            for (int i = first; i <= last; i++)
+            {
+                digit_bits += log_Q_bases_bit_sizes[i];
+            }
+            if (digit_bits > P_bits)
+            {
+                throw ParameterError(error_message(
+                    "The key switching digit of the Q primes ", first, " to ",
+                    last, " has ", digit_bits, " bits, more than the ", P_bits,
+                    " bits of P! Key switching splits Q into digits of as "
+                    "many primes as P has (",
+                    P_size,
+                    "), and P needs at least as many bits as each "
+                    "digit."));
+            }
+        }
     }
 
     Data64 extendedGCD(Data64 a, Data64 b, Data64& x, Data64& y)
@@ -124,10 +240,35 @@ namespace heongpu
         return ((size - 1) * 64) + calculate_bit_count(number[size - 1]);
     }
 
+    namespace
+    {
+        // Exact for every 64-bit modulus, unlike the Barrett reduction of
+        // Modulus64.
+        Data64 mult_mod(Data64 a, Data64 b, Data64 modulus)
+        {
+            return static_cast<Data64>(static_cast<unsigned __int128>(a) * b %
+                                       modulus);
+        }
+
+        Data64 exp_mod(Data64 base, Data64 exponent, Data64 modulus)
+        {
+            Data64 result = 1 % modulus;
+            base %= modulus;
+            while (exponent > 0)
+            {
+                if (exponent & 1)
+                {
+                    result = mult_mod(result, base, modulus);
+                }
+                base = mult_mod(base, base, modulus);
+                exponent >>= 1;
+            }
+            return result;
+        }
+    } // namespace
+
     bool miller_rabin(const Data64& value, size_t num_rounds)
     {
-        Modulus64 modulus_in(value);
-
         Data64 d = value - 1;
         Data64 r = 0;
         while (0 == (d & 0x1)) // #true while the last bit of r is zero
@@ -140,23 +281,44 @@ namespace heongpu
             return false;
         }
 
-        // apply miller_rabin primality test
-        std::random_device rand;
+        // The first rounds use the twelve smallest primes as bases, which
+        // decide every 64-bit value without error; further rounds use random
+        // bases.
+        static const Data64 bases[] = {2,  3,  5,  7,  11, 13,
+                                       17, 19, 23, 29, 31, 37};
+        constexpr size_t base_count = sizeof(bases) / sizeof(bases[0]);
+        std::unique_ptr<std::random_device> rand;
         std::uniform_int_distribution<Data64> dist(3, value - 1);
         for (size_t i = 0; i < num_rounds; i++)
         {
-            Data64 a = i ? dist(rand) : 2;
-            Data64 x = OPERATOR64::exp(a, d, modulus_in);
+            Data64 a;
+            if (i < base_count)
+            {
+                a = bases[i] % value;
+                if (a == 0)
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                if (!rand)
+                {
+                    rand = std::make_unique<std::random_device>();
+                }
+                a = dist(*rand);
+            }
+            Data64 x = exp_mod(a, d, value);
             if (x == 1 || x == value - 1)
             {
                 continue;
             }
-            Data64 count = 0;
-            do
+            // value is a probable prime if x becomes -1 within r - 1
+            // squarings.
+            for (Data64 count = 1; (count < r) && (x != value - 1); count++)
             {
-                x = OPERATOR64::mult(x, x, modulus_in);
-                count++;
-            } while (x != value - 1 && count < r - 1);
+                x = mult_mod(x, x, value);
+            }
             if (x != value - 1)
             {
                 return false;
@@ -167,10 +329,12 @@ namespace heongpu
 
     bool is_prime(const Data64& value)
     {
-        size_t num_rounds = 11;
+        // Twelve rounds with the fixed bases of miller_rabin decide every
+        // 64-bit value.
+        size_t num_rounds = 12;
 
         // First check the prime under 1000.
-        std::vector<Data64> low_primes = {
+        static const std::vector<Data64> low_primes = {
             3ULL,   5ULL,   7ULL,   11ULL,  13ULL,  17ULL,  19ULL,  23ULL,
             29ULL,  31ULL,  37ULL,  41ULL,  43ULL,  47ULL,  53ULL,  59ULL,
             61ULL,  67ULL,  71ULL,  73ULL,  79ULL,  83ULL,  89ULL,  97ULL,
@@ -307,6 +471,141 @@ namespace heongpu
         }
 
         return all_primes;
+    }
+
+    int max_coeff_bit_count(sec_level_type level, size_t poly_modulus_degree)
+    {
+        switch (level)
+        {
+            case sec_level_type::sec128:
+                return heongpu_128bit_std_parms(poly_modulus_degree);
+            case sec_level_type::sec192:
+                return heongpu_192bit_std_parms(poly_modulus_degree);
+            case sec_level_type::sec256:
+                return heongpu_256bit_std_parms(poly_modulus_degree);
+            default:
+                return 0;
+        }
+    }
+
+    namespace
+    {
+        // Walks the values 1 (mod factor) from start towards end, which is
+        // excluded, and returns the next prime not in excluded, or 0.
+        class PrimeWalk
+        {
+          public:
+            PrimeWalk(Data64 start, Data64 end, Data64 factor,
+                      const std::vector<Data64>& excluded)
+                : value_(start), end_(end), factor_(factor), up_(start < end),
+                  excluded_(excluded)
+            {
+            }
+
+            Data64 next()
+            {
+                while (up_ ? (value_ < end_) : (value_ > end_))
+                {
+                    Data64 candidate = value_;
+                    value_ = up_ ? value_ + factor_ : value_ - factor_;
+                    if (is_prime(candidate) &&
+                        std::find(excluded_.begin(), excluded_.end(),
+                                  candidate) == excluded_.end())
+                    {
+                        return candidate;
+                    }
+                }
+                return 0;
+            }
+
+          private:
+            Data64 value_;
+            Data64 end_;
+            Data64 factor_;
+            bool up_;
+            const std::vector<Data64>& excluded_;
+        };
+
+        void check_prime_request(size_t poly_modulus_degree, int bit_size,
+                                 int max_bit_size)
+        {
+            if (!is_power_of_two(poly_modulus_degree) ||
+                (poly_modulus_degree > MAX_POLY_DEGREE) ||
+                (poly_modulus_degree < MIN_POLY_DEGREE))
+            {
+                throw ParameterError(error_message(
+                    "Invalid poly modulus degree ", poly_modulus_degree,
+                    "! Expected a power of two from ", MIN_POLY_DEGREE, " to ",
+                    MAX_POLY_DEGREE, "."));
+            }
+            // 2N + 1, the smallest candidate, has log2(N) + 2 bits.
+            int min_bit_size = calculate_bit_size(poly_modulus_degree) + 1;
+            if ((bit_size < min_bit_size) || (bit_size > max_bit_size))
+            {
+                throw ParameterError(error_message(
+                    "Invalid prime bit size ", bit_size, "! Expected ",
+                    min_bit_size, " to ", max_bit_size,
+                    " for N = ", poly_modulus_degree, "."));
+            }
+        }
+
+        [[noreturn]] void throw_not_enough_primes(size_t count, int bit_size,
+                                                  size_t poly_modulus_degree)
+        {
+            throw ParameterError(error_message(
+                "Not enough primes 1 mod ", 2 * poly_modulus_degree,
+                " around 2^", bit_size, " for ", count, " moduli!"));
+        }
+    } // namespace
+
+    std::vector<Data64>
+    generate_primes_below(size_t poly_modulus_degree, int bit_size,
+                          size_t count, const std::vector<Data64>& excluded)
+    {
+        check_prime_request(poly_modulus_degree, bit_size, MAX_MOD_BIT_COUNT);
+
+        Data64 factor = Data64(2) * Data64(poly_modulus_degree);
+        Data64 power = Data64(1) << bit_size;
+        PrimeWalk below(power - factor + 1, power >> 1, factor, excluded);
+
+        std::vector<Data64> primes;
+        while (primes.size() < count)
+        {
+            Data64 prime = below.next();
+            if (prime == 0)
+            {
+                throw_not_enough_primes(count, bit_size, poly_modulus_degree);
+            }
+            primes.push_back(prime);
+        }
+        return primes;
+    }
+
+    std::vector<Data64>
+    generate_primes_around(size_t poly_modulus_degree, int bit_size,
+                           size_t count, const std::vector<Data64>& excluded)
+    {
+        // The primes above 2^bit_size have one more bit.
+        check_prime_request(poly_modulus_degree, bit_size,
+                            MAX_MOD_BIT_COUNT - 1);
+
+        Data64 factor = Data64(2) * Data64(poly_modulus_degree);
+        Data64 power = Data64(1) << bit_size;
+        PrimeWalk below(power - factor + 1, power >> 1, factor, excluded);
+        PrimeWalk above(power + 1, power << 1, factor, excluded);
+
+        std::vector<Data64> primes;
+        while (primes.size() < count)
+        {
+            Data64 prime =
+                (primes.size() % 2 == 0) ? below.next() : above.next();
+            if (prime == 0)
+            {
+                throw_not_enough_primes(count, bit_size, poly_modulus_degree);
+            }
+            primes.push_back(prime);
+        }
+        return primes;
     }
 
     bool is_primitive_root(Data64 root, size_t degree, Modulus64& modulus)
@@ -468,9 +767,11 @@ namespace heongpu
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x; // ring size
 
+        // The values from (t + 1) / 2 up are negative: an odd t gives
+        // -(t - 1) / 2 to (t - 1) / 2.
         int64_t threshold = (modulus[0].value + 1) >> 1;
         int64_t input_reg = static_cast<int64_t>(input[idx]);
-        input_reg = (input_reg > threshold)
+        input_reg = (input_reg >= threshold)
                         ? input_reg - static_cast<int64_t>(modulus[0].value)
                         : input_reg;
 
@@ -484,77 +785,6 @@ namespace heongpu
         if (idx < size)
         {
             vector[idx] = number;
-        }
-    }
-
-    int find_closest_divisor(int N)
-    {
-        double target = std::sqrt(N);
-        int closest_div = 1;
-        double min_diff = std::abs(closest_div - target);
-
-        for (int k = 1; k <= std::sqrt(N); ++k)
-        {
-            if (N % k == 0)
-            {
-                for (int divisor : {k, N / k})
-                {
-                    double diff = std::abs(divisor - target);
-                    if (diff < min_diff)
-                    {
-                        min_diff = diff;
-                        closest_div = divisor;
-                    }
-                }
-            }
-        }
-        return closest_div;
-    }
-
-    std::vector<std::vector<int>> split_array(const std::vector<int>& array,
-                                              int chunk_size)
-    {
-        std::vector<std::vector<int>> result;
-        int n = array.size();
-        for (int i = 0; i < n; i += chunk_size)
-        {
-            result.emplace_back(array.begin() + i,
-                                array.begin() + min(i + chunk_size, n));
-        }
-        return result;
-    }
-
-    std::vector<std::vector<int>> seperate_func(const std::vector<int>& A)
-    {
-        int initial_size = A.size();
-        int counter = 2;
-        int offset = A[1] - A[0];
-
-        for (size_t i = 1; i < A.size() - 1; ++i)
-        {
-            if (A[i + 1] - A[i] != offset)
-            {
-                break;
-            }
-            counter++;
-        }
-
-        int real_n1 = heongpu::find_closest_divisor(counter);
-
-        if (counter == initial_size)
-        {
-            return split_array(A, real_n1);
-        }
-        else
-        {
-            auto first_part = split_array(
-                std::vector<int>(A.begin(), A.begin() + counter), real_n1);
-            auto second_part = split_array(
-                std::vector<int>(A.begin() + counter, A.end()), real_n1);
-
-            first_part.insert(first_part.end(), second_part.begin(),
-                              second_part.end());
-            return first_part;
         }
     }
 
@@ -643,11 +873,11 @@ namespace heongpu
     }
 
     // Find a good N1 and N2 split as close as possible to the desired ratio
-    std::vector<std::vector<int>> seperate_func_v2(const std::vector<int>& A,
-                                                   int slots,
-                                                   std::vector<int>& rot_n1,
-                                                   std::vector<int>& rot_n2,
-                                                   float bsgs_ratio)
+    std::vector<std::vector<int>> seperate_func(const std::vector<int>& A,
+                                                int slots,
+                                                std::vector<int>& rot_n1,
+                                                std::vector<int>& rot_n2,
+                                                float bsgs_ratio)
     {
         int N1 = find_best_bsgs_split(A, slots, bsgs_ratio);
         auto result = bsgs_index(A, N1, rot_n1, rot_n2);
@@ -661,34 +891,9 @@ namespace heongpu
         return std::vector<int>(result.begin(), result.end());
     }
 
-    BootstrappingConfig::BootstrappingConfig(int CtoS, int StoC, int taylor,
-                                             bool less_key_mode)
-        : CtoS_piece_(CtoS), StoC_piece_(StoC), taylor_number_(taylor),
-          less_key_mode_(less_key_mode)
-    {
-        validate();
-    }
-
-    // Validation Function Implementation
-    void BootstrappingConfig::validate()
-    {
-        if (CtoS_piece_ < 2 || CtoS_piece_ > 5)
-        {
-            throw std::out_of_range("CtoS_piece must be in range [2, 5]");
-        }
-        if (StoC_piece_ < 2 || StoC_piece_ > 5)
-        {
-            throw std::out_of_range("StoC_piece must be in range [2, 5]");
-        }
-        if (taylor_number_ < 6 || taylor_number_ > 15)
-        {
-            throw std::out_of_range("taylor_number must be in range [6, 15]");
-        }
-    }
-
-    BootstrappingConfigV2::BootstrappingConfigV2(
-        EncodingMatrixConfig stc_config, EvalModConfig eval_mod_config,
-        EncodingMatrixConfig cts_config)
+    BootstrappingConfig::BootstrappingConfig(EncodingMatrixConfig stc_config,
+                                             EvalModConfig eval_mod_config,
+                                             EncodingMatrixConfig cts_config)
         : CtoS_piece_(cts_config.piece_), StoC_piece_(stc_config.piece_),
           stc_config_(stc_config), eval_mod_config_(eval_mod_config),
           cts_config_(cts_config)
@@ -903,6 +1108,26 @@ namespace heongpu
         free(ptr);
 
         return result_upper_half_threshold;
+    }
+
+    void ensure_kernel_stack_size(size_t bytes, bool raise)
+    {
+        size_t current = 0;
+        HEONGPU_CUDA_CHECK(cudaDeviceGetLimit(&current, cudaLimitStackSize));
+        if (current >= bytes)
+        {
+            return;
+        }
+        if (!raise)
+        {
+            throw StateError(error_message(
+                "The CUDA kernel stack size limit is ", current,
+                " bytes, but HEonGPU needs at least ", bytes,
+                ". Raise it with cudaDeviceSetLimit(cudaLimitStackSize, ",
+                bytes,
+                ") or leave MemoryPoolConfig::raise_kernel_stack_size on."));
+        }
+        HEONGPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, bytes));
     }
 
     //////////////////////////////////////////////////////////////////////////////////

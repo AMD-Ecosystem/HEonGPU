@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -13,13 +14,13 @@ constexpr auto Scheme = heongpu::Scheme::CKKS;
 int main(int argc, char* argv[])
 {
     // Initialize encryption parameters for the CKKS scheme.
-    heongpu::HEContext<Scheme> context =
-        heongpu::GenHEContext<Scheme>(heongpu::sec_level_type::none);
-
+    heongpu::HEParams<Scheme> params;
+    params.security_level = heongpu::sec_level_type::none;
     size_t poly_modulus_degree = 16384;
-    context->set_poly_modulus_degree(poly_modulus_degree);
-    context->set_coeff_modulus_bit_sizes({60, 36, 36, 36, 36, 36, 36, 36},
-                                         {60, 60});
+    params.poly_modulus_degree = poly_modulus_degree;
+    params.coeff_modulus_bit_sizes = {60, 36, 36, 36, 36, 36, 36, 36};
+    params.special_modulus_bit_sizes = {60, 60};
+    heongpu::HEContext<Scheme> context = params.make_context();
     context->generate();
     context->print_parameters();
 
@@ -60,7 +61,7 @@ int main(int argc, char* argv[])
     keygen.generate_switch_key(
         switch_key1_to_key2, secret_key2, secret_key,
         heongpu::ExecutionOptions().set_storage_type(
-            heongpu::storage_type::HOST)); // generate_switch_key is stored in
+            heongpu::storage_type::host)); // generate_switch_key is stored in
                                            // HOST
 
     heongpu::HEEncoder<Scheme> encoder(context);
@@ -105,7 +106,7 @@ int main(int argc, char* argv[])
     operators.multiply_inplace(C1, C1);
     std::cout << "Remove non-linear part of ciphertext." << std::endl;
     operators.relinearize_inplace(C1, relin_key);
-    std::cout << "Divede ciphertext to last modulus and reduce noise."
+    std::cout << "Divide ciphertext to last modulus and reduce noise."
               << std::endl;
     operators.rescale_inplace(C1);
 
@@ -124,10 +125,8 @@ int main(int argc, char* argv[])
     std::cout << "Check result:" << std::endl;
     display_vector(check1);
 
-    std::cout << "Shift row +3:" << std::endl;
-    // Input is vector in CKKS, but still use rotate_rows_inplace.
-    // It will be fixed soon.
-    operators.rotate_rows_inplace(C1, galois_key, 3);
+    std::cout << "Shift +3:" << std::endl;
+    operators.rotate_inplace(C1, galois_key, 3);
 
     std::cout << "Decrypt and decode result." << std::endl;
     heongpu::Plaintext<Scheme> P3(context);

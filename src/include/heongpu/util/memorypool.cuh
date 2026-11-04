@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -10,6 +11,7 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <unordered_set>
 #ifndef _WIN32
 #include <sys/sysinfo.h>
 #endif
@@ -23,13 +25,14 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 
-#include <rmm/mr/host/pinned_memory_resource.hpp>
-#include <rmm/mr/host/host_memory_resource.hpp>
-#include <rmm/mr/device/cuda_memory_resource.hpp>
-#include <rmm/mr/device/pool_memory_resource.hpp>
-#include <rmm/mr/device/statistics_resource_adaptor.hpp>
-#include <rmm/mr/device/detail/stream_ordered_memory_resource.hpp>
-#include <rmm/mr/device/logging_resource_adaptor.hpp>
+#include <rmm/aligned.hpp>
+#include <rmm/error.hpp>
+#include <rmm/resource_ref.hpp>
+#include <rmm/mr/pinned_host_memory_resource.hpp>
+#include <rmm/mr/cuda_memory_resource.hpp>
+#include <rmm/mr/pool_memory_resource.hpp>
+#include <rmm/mr/statistics_resource_adaptor.hpp>
+#include <rmm/mr/per_device_resource.hpp>
 
 // --------------------- //
 // Author: Alisah Ozcan
@@ -52,21 +55,32 @@ namespace heongpu
 
         bool use_memory_pool = true;
 
+        // Also make HEonGPU's device memory resource the process-wide RMM
+        // default (rmm::mr::set_current_device_resource), so that the other
+        // RMM allocations of the process use HEonGPU's pool. HEonGPU does not
+        // need this itself. The previous default is restored when a later
+        // context turns it off and at exit.
+        bool set_as_rmm_default = false;
+
+        // HEonGPU's kernels need a per-thread stack of at least 2048 bytes.
+        // When the CUDA limit (cudaLimitStackSize) is lower, generate() raises
+        // it for the whole process; a higher limit is kept. Turn this off to
+        // manage the limit in the application; generate() then throws
+        // StateError instead of raising a limit that is too low.
+        bool raise_kernel_stack_size = true;
+
         static MemoryPoolConfig Defaults();
     };
 
     class MemoryPool
     {
         using DeviceResource = rmm::mr::cuda_memory_resource;
-        using DevicePoolResource =
-            rmm::mr::pool_memory_resource<DeviceResource>;
-        using DeviceStatsAdaptor = rmm::mr::statistics_resource_adaptor<
-            rmm::mr::device_memory_resource>;
+        using DevicePoolResource = rmm::mr::pool_memory_resource;
+        using DeviceStatsAdaptor = rmm::mr::statistics_resource_adaptor;
 
-        using HostResource = rmm::mr::pinned_memory_resource;
-        using HostPoolResource = rmm::mr::pool_memory_resource<HostResource>;
-        using HostStatsAdaptor =
-            rmm::mr::statistics_resource_adaptor<HostPoolResource>;
+        using HostResource = rmm::mr::pinned_host_memory_resource;
+        using HostPoolResource = rmm::mr::pool_memory_resource;
+        using HostStatsAdaptor = rmm::mr::statistics_resource_adaptor;
 
       public:
         static MemoryPool& instance();
@@ -75,19 +89,27 @@ namespace heongpu
         void initialize(const MemoryPoolConfig& config);
         // for device
         void use_memory_pool(bool use);
+        // See MemoryPoolConfig::set_as_rmm_default.
+        void set_as_rmm_default(bool enable);
+        // Destroys the pools, so that the next initialize() creates new ones
+        // with a new configuration, and restores the RMM default. Throws
+        // StateError, without changing anything, while pool memory is in use.
+        // Used by heongpu::shutdown().
+        void release();
 
         // for device
         void* allocate(size_t size, cudaStream_t stream = cudaStreamDefault);
         void deallocate(void* ptr, size_t size,
                         cudaStream_t stream = cudaStreamDefault);
 
-        rmm::mr::device_memory_resource* get_device_resource() const;
+        rmm::device_async_resource_ref get_device_resource() const;
         HostStatsAdaptor* get_host_resource() const;
 
         void* host_allocate(size_t size);
         void host_deallocate(void* ptr, size_t size);
 
-        void print_memory_pool_status() const;
+        // Writes the pool sizes and usage to os, std::cout by default.
+        void print_memory_pool_status(std::ostream& os = std::cout) const;
         size_t get_current_device_pool_memory_usage() const;
         size_t get_free_device_pool_memory() const;
 
@@ -103,6 +125,7 @@ namespace heongpu
 
         void clean_pool();
         void ensure_base_resources();
+        rmm::device_async_resource_ref device_resource();
         size_t get_host_avaliable_memory() const;
         size_t get_decive_avaliable_memory() const;
         size_t roundup_256(size_t size) const;
@@ -115,14 +138,25 @@ namespace heongpu
         static std::shared_ptr<DevicePoolResource> device_pool_;
         static std::shared_ptr<DeviceStatsAdaptor> device_stats_adaptor_;
         static bool initialized_;
+        // Set by use_memory_pool(); selects the resource for new allocations.
+        static bool use_pool_;
+        // Raw and host allocations served by the pools, so that they are
+        // returned to them even after use_memory_pool(false).
+        static std::unordered_set<void*> pooled_device_allocations_;
+        static std::unordered_set<void*> pooled_host_allocations_;
+        // The RMM default that set_as_rmm_default(true) replaced, restored by
+        // set_as_rmm_default(false) and at exit.
+        static std::optional<
+            cuda::mr::any_resource<cuda::mr::device_accessible>>
+            previous_rmm_default_;
         static std::mutex mutex_;
     };
 
     template <typename T> struct rmm_pinned_allocator
     {
         using value_type = T;
-        using HostResource = rmm::mr::pinned_memory_resource;
-        using HostPoolResource = rmm::mr::pool_memory_resource<HostResource>;
+        using HostResource = rmm::mr::pinned_host_memory_resource;
+        using HostPoolResource = rmm::mr::pool_memory_resource;
 
         rmm_pinned_allocator() = default;
 

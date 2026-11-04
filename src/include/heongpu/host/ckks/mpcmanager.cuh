@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -59,17 +60,21 @@ namespace heongpu
          * public key.
          */
         __host__ void generate_public_key_share(
-            MultipartyPublickey<Scheme::CKKS>& pk, Secretkey<Scheme::CKKS>& sk,
+            MultipartyPublickey<Scheme::CKKS>& pk,
+            const Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            sk.validate_context(context_);
             if (!sk.secret_key_generated_)
             {
-                throw std::logic_error("Secretkey is not generated!");
+                throw StateError("Secretkey is not generated! Call "
+                                 "HEKeyGenerator::generate_secret_key first.");
             }
 
             if (pk.public_key_generated_)
             {
-                throw std::logic_error("Publickey is already generated!");
+                throw StateError("Publickey is already generated! "
+                                 "Use a new Publickey object.");
             }
 
             input_storage_manager(
@@ -105,7 +110,7 @@ namespace heongpu
          * public key will be stored.
          */
         __host__ void assemble_public_key_share(
-            std::vector<MultipartyPublickey<Scheme::CKKS>>& all_pk,
+            const std::vector<MultipartyPublickey<Scheme::CKKS>>& all_pk,
             Publickey<Scheme::CKKS>& pk,
             const ExecutionOptions& options = ExecutionOptions())
         {
@@ -158,21 +163,15 @@ namespace heongpu
          * relinearization key.
          */
         __host__ void generate_relin_key_init(
-            MultipartyRelinkey<Scheme::CKKS>& rk, Secretkey<Scheme::CKKS>& sk,
+            MultipartyRelinkey<Scheme::CKKS>& rk,
+            const Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(rk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_relin_key_method_I_stage_1(rk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_ckks_relin_key_method_II_stage_1(rk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            input_storage_manager(
+                sk,
+                [&](Secretkey<Scheme::CKKS>& sk_)
+                { generate_ckks_relin_key_stage_1(rk, sk_, options); },
+                options, false);
         }
 
         /**
@@ -191,31 +190,29 @@ namespace heongpu
          * relinearization key piece.
          */
         __host__ void generate_relin_key_share(
-            MultipartyRelinkey<Scheme::CKKS>& rk_s1_common,
+            const MultipartyRelinkey<Scheme::CKKS>& rk_s1_common,
             MultipartyRelinkey<Scheme::CKKS>& rk_new,
-            Secretkey<Scheme::CKKS>& sk,
+            const Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            if ((rk_s1_common.scheme_ != rk_new.scheme_) ||
-                (rk_s1_common.key_type != rk_new.key_type))
+            if (rk_s1_common.scheme_ != rk_new.scheme_)
             {
                 throw std::invalid_argument("Invalid relinkey parameters!");
             }
 
-            switch (static_cast<int>(rk_s1_common.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_relin_key_method_I_stage_3(rk_s1_common, rk_new,
-                                                        sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_ckks_relin_key_method_II_stage_3(
-                        rk_s1_common, rk_new, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            input_storage_manager(
+                rk_s1_common,
+                [&](MultipartyRelinkey<Scheme::CKKS>& rk_s1_common_)
+                {
+                    input_storage_manager(
+                        sk,
+                        [&](Secretkey<Scheme::CKKS>& sk_) {
+                            generate_ckks_relin_key_stage_3(
+                                rk_s1_common_, rk_new, sk_, options);
+                        },
+                        options, false);
+                },
+                options, false);
         }
 
         /**
@@ -232,11 +229,15 @@ namespace heongpu
          * aggregated key.
          */
         __host__ void assemble_relin_key_init(
-            std::vector<MultipartyRelinkey<Scheme::CKKS>>& all_rk,
+            const std::vector<MultipartyRelinkey<Scheme::CKKS>>& all_rk,
             MultipartyRelinkey<Scheme::CKKS>& rk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            generate_relin_key_stage_2(all_rk, rk, options);
+            input_vector_storage_manager(
+                all_rk,
+                [&](std::vector<MultipartyRelinkey<Scheme::CKKS>>& all_rk_)
+                { generate_relin_key_stage_2(all_rk_, rk, options); },
+                options, false);
         }
 
         /**
@@ -255,12 +256,25 @@ namespace heongpu
          * aggregated key.
          */
         __host__ void assemble_relin_key_share(
-            std::vector<MultipartyRelinkey<Scheme::CKKS>>& all_rk,
-            MultipartyRelinkey<Scheme::CKKS>& rk_common_stage1,
+            const std::vector<MultipartyRelinkey<Scheme::CKKS>>& all_rk,
+            const MultipartyRelinkey<Scheme::CKKS>& rk_common_stage1,
             Relinkey<Scheme::CKKS>& rk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            generate_relin_key_stage_4(all_rk, rk_common_stage1, rk, options);
+            input_vector_storage_manager(
+                all_rk,
+                [&](std::vector<MultipartyRelinkey<Scheme::CKKS>>& all_rk_)
+                {
+                    input_storage_manager(
+                        rk_common_stage1,
+                        [&](MultipartyRelinkey<Scheme::CKKS>& rk_common_stage1_)
+                        {
+                            generate_relin_key_stage_4(
+                                all_rk_, rk_common_stage1_, rk, options);
+                        },
+                        options, false);
+                },
+                options, false);
         }
 
         /**
@@ -272,21 +286,15 @@ namespace heongpu
          * Galois key.
          */
         __host__ void generate_galois_key_share(
-            MultipartyGaloiskey<Scheme::CKKS>& gk, Secretkey<Scheme::CKKS>& sk,
+            MultipartyGaloiskey<Scheme::CKKS>& gk,
+            const Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(gk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_galois_key_method_I_stage_1(gk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_galois_key_method_II_stage_1(gk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            input_storage_manager(
+                sk,
+                [&](Secretkey<Scheme::CKKS>& sk_)
+                { generate_galois_key_stage_1(gk, sk_, options); },
+                options, false);
         }
 
         /**
@@ -305,11 +313,15 @@ namespace heongpu
          * scheme is specified.
          */
         __host__ void assemble_galois_key_share(
-            std::vector<MultipartyGaloiskey<Scheme::CKKS>>& all_gk,
+            const std::vector<MultipartyGaloiskey<Scheme::CKKS>>& all_gk,
             Galoiskey<Scheme::CKKS>& gk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            generate_galois_key_stage_2(all_gk, gk, options);
+            input_vector_storage_manager(
+                all_gk,
+                [&](std::vector<MultipartyGaloiskey<Scheme::CKKS>>& all_gk_)
+                { generate_galois_key_stage_2(all_gk_, gk, options); },
+                options, false);
         }
 
         /**
@@ -328,15 +340,30 @@ namespace heongpu
          * partially decrypted data.
          */
         __host__ void
-        decrypt_partial(Ciphertext<Scheme::CKKS>& ciphertext,
-                        Secretkey<Scheme::CKKS>& sk,
+        decrypt_partial(const Ciphertext<Scheme::CKKS>& ciphertext,
+                        const Secretkey<Scheme::CKKS>& sk,
                         Ciphertext<Scheme::CKKS>& partial_ciphertext,
                         const ExecutionOptions& options = ExecutionOptions())
         {
-            partial_decrypt_stage_1(ciphertext, sk, partial_ciphertext,
-                                    options.stream_);
+            ciphertext.validate_context(context_);
+            input_storage_manager(
+                ciphertext,
+                [&](Ciphertext<Scheme::CKKS>& ciphertext_)
+                {
+                    input_storage_manager(
+                        sk,
+                        [&](Secretkey<Scheme::CKKS>& sk_)
+                        {
+                            partial_decrypt_stage_1(ciphertext_, sk_,
+                                                    partial_ciphertext,
+                                                    options.stream_);
+                        },
+                        options, false);
+                },
+                options, false);
 
             partial_ciphertext.scheme_ = context_->scheme_;
+            partial_ciphertext.context_id_ = context_->context_id_;
             partial_ciphertext.ring_size_ = context_->n;
             partial_ciphertext.coeff_modulus_count_ = context_->Q_size;
             partial_ciphertext.cipher_size_ = 2;
@@ -364,10 +391,14 @@ namespace heongpu
          * all partial decryptions.
          */
         __host__ void
-        decrypt(std::vector<Ciphertext<Scheme::CKKS>>& ciphertexts,
+        decrypt(const std::vector<Ciphertext<Scheme::CKKS>>& ciphertexts,
                 Plaintext<Scheme::CKKS>& plaintext,
                 const ExecutionOptions& options = ExecutionOptions())
         {
+            for (const auto& ciphertext : ciphertexts)
+            {
+                ciphertext.validate_context(context_);
+            }
             int cipher_count = ciphertexts.size();
 
             if (cipher_count == 0)
@@ -419,8 +450,9 @@ namespace heongpu
                                                     options.stream_);
 
                             plaintext_.plain_size_ =
-                                context_->n * context_->Q_size;
+                                context_->n * (context_->Q_size - depth_check);
                             plaintext_.scheme_ = context_->scheme_;
+                            plaintext_.context_id_ = context_->context_id_;
                             plaintext_.depth_ = depth_check;
                             plaintext_.scale_ = scale_check;
                             plaintext_.in_ntt_domain_ = true;
@@ -452,10 +484,12 @@ namespace heongpu
          * @param seed         Common seed material for the RNG.
          */
         __host__ void distributed_bootstrapping_participant(
-            Ciphertext<Scheme::CKKS>& common, Ciphertext<Scheme::CKKS>& output,
-            Secretkey<Scheme::CKKS>& secret_key, const RNGSeed& seed,
+            const Ciphertext<Scheme::CKKS>& common,
+            Ciphertext<Scheme::CKKS>& output,
+            const Secretkey<Scheme::CKKS>& secret_key, const RNGSeed& seed,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            common.validate_context(context_);
             input_storage_manager(
                 common,
                 [&](Ciphertext<Scheme::CKKS>& common_)
@@ -473,14 +507,15 @@ namespace heongpu
                                         options.stream_);
 
                                     output.scheme_ = context_->scheme_;
+                                    output.context_id_ = context_->context_id_;
                                     output.ring_size_ = context_->n;
                                     output.coeff_modulus_count_ =
                                         context_->Q_size;
                                     output.cipher_size_ = 2;
-                                    output.depth_ = common.depth_;
+                                    output.depth_ = common_.depth_;
                                     output.in_ntt_domain_ = true;
-                                    output.encoding_ = common.encoding_;
-                                    output.scale_ = common.scale_;
+                                    output.encoding_ = common_.encoding_;
+                                    output.scale_ = common_.scale_;
                                     output.rescale_required_ = false;
                                     output.relinearization_required_ = false;
                                     output.ciphertext_generated_ = true;
@@ -513,11 +548,29 @@ namespace heongpu
          * @param seed         Common seed material for the RNG.
          */
         __host__ void distributed_bootstrapping_coordinator(
-            std::vector<Ciphertext<Scheme::CKKS>>& ciphertexts,
-            Ciphertext<Scheme::CKKS>& common, Ciphertext<Scheme::CKKS>& output,
-            const RNGSeed& seed,
+            const std::vector<Ciphertext<Scheme::CKKS>>& ciphertexts,
+            const Ciphertext<Scheme::CKKS>& common,
+            Ciphertext<Scheme::CKKS>& output, const RNGSeed& seed,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            common.validate_context(context_);
+            if (ciphertexts.empty())
+            {
+                throw std::invalid_argument("No ciphertext to bootstrap!");
+            }
+            const size_t share_size =
+                size_t(context_->n) *
+                (2 * size_t(context_->Q_size) - common.depth_);
+            for (auto& ciphertext : ciphertexts)
+            {
+                ciphertext.validate_context(context_);
+                if (ciphertext.depth_ != common.depth_ ||
+                    size_t(ciphertext.memory_size()) < share_size)
+                {
+                    throw std::invalid_argument(
+                        "Invalid bootstrapping share size!");
+                }
+            }
             input_vector_storage_manager(
                 ciphertexts,
                 [&](std::vector<Ciphertext<Scheme::CKKS>>& ciphertexts_)
@@ -535,13 +588,14 @@ namespace heongpu
                                         options.stream_);
 
                                     output.scheme_ = context_->scheme_;
+                                    output.context_id_ = context_->context_id_;
                                     output.ring_size_ = context_->n;
                                     output.coeff_modulus_count_ =
                                         context_->Q_size;
                                     output.cipher_size_ = 2;
                                     output.depth_ = 0;
                                     output.in_ntt_domain_ = true;
-                                    output.encoding_ = encoding::SLOT;
+                                    output.encoding_ = encoding::slot;
                                     output.scale_ = scale_;
                                     output.rescale_required_ = false;
                                     output.relinearization_required_ = false;
@@ -571,20 +625,12 @@ namespace heongpu
             std::vector<MultipartyPublickey<Scheme::CKKS>>& all_pk,
             Publickey<Scheme::CKKS>& pk, const cudaStream_t stream);
 
-        __host__ void generate_relin_key_method_I_stage_1(
-            MultipartyRelinkey<Scheme::CKKS>& rk, Secretkey<Scheme::CKKS>& sk,
-            const ExecutionOptions& options);
+        __host__ void
+        generate_ckks_relin_key_stage_1(MultipartyRelinkey<Scheme::CKKS>& rk,
+                                        Secretkey<Scheme::CKKS>& sk,
+                                        const ExecutionOptions& options);
 
-        __host__ void generate_relin_key_method_I_stage_3(
-            MultipartyRelinkey<Scheme::CKKS>& rk_stage_1,
-            MultipartyRelinkey<Scheme::CKKS>& rk_stage_2,
-            Secretkey<Scheme::CKKS>& sk, const ExecutionOptions& options);
-
-        __host__ void generate_ckks_relin_key_method_II_stage_1(
-            MultipartyRelinkey<Scheme::CKKS>& rk, Secretkey<Scheme::CKKS>& sk,
-            const ExecutionOptions& options);
-
-        __host__ void generate_ckks_relin_key_method_II_stage_3(
+        __host__ void generate_ckks_relin_key_stage_3(
             MultipartyRelinkey<Scheme::CKKS>& rk_stage_1,
             MultipartyRelinkey<Scheme::CKKS>& rk_stage_2,
             Secretkey<Scheme::CKKS>& sk, const ExecutionOptions& options);
@@ -599,13 +645,10 @@ namespace heongpu
             MultipartyRelinkey<Scheme::CKKS>& rk_common_stage1,
             Relinkey<Scheme::CKKS>& rk, const ExecutionOptions& options);
 
-        __host__ void generate_galois_key_method_I_stage_1(
-            MultipartyGaloiskey<Scheme::CKKS>& gk, Secretkey<Scheme::CKKS>& sk,
-            const ExecutionOptions& options);
-
-        __host__ void generate_galois_key_method_II_stage_1(
-            MultipartyGaloiskey<Scheme::CKKS>& gk, Secretkey<Scheme::CKKS>& sk,
-            const ExecutionOptions& options);
+        __host__ void
+        generate_galois_key_stage_1(MultipartyGaloiskey<Scheme::CKKS>& gk,
+                                    Secretkey<Scheme::CKKS>& sk,
+                                    const ExecutionOptions& options);
 
         __host__ void generate_galois_key_stage_2(
             std::vector<MultipartyGaloiskey<Scheme::CKKS>>& all_gk,

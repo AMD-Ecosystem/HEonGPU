@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -11,7 +12,10 @@ namespace heongpu
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = context;
@@ -20,12 +24,24 @@ namespace heongpu
         ring_size_ = context->n; // n
         in_ntt_domain_ = false;
 
-        storage_type_ = storage_type::DEVICE;
+        storage_type_ = storage_type::device;
     }
 
     Data64* Publickey<Scheme::BFV>::data()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
+        {
+            return device_locations_.data();
+        }
+        else
+        {
+            return host_locations_.data();
+        }
+    }
+
+    const Data64* Publickey<Scheme::BFV>::data() const
+    {
+        if (storage_type_ == storage_type::device)
         {
             return device_locations_.data();
         }
@@ -37,7 +53,7 @@ namespace heongpu
 
     void Publickey<Scheme::BFV>::store_in_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -51,17 +67,19 @@ namespace heongpu
             {
                 device_locations_ =
                     DeviceVector<Data64>(host_locations_, stream);
+                // The copies above read host memory until they finish.
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(stream));
                 host_locations_.resize(0);
                 host_locations_.shrink_to_fit();
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Publickey<Scheme::BFV>::store_in_host(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             if (memory_size() == 0)
             {
@@ -69,7 +87,7 @@ namespace heongpu
             }
             else
             {
-                int publickey_memory_size = coeff_modulus_count_ * ring_size_;
+                int publickey_memory_size = device_locations_.size();
                 host_locations_ = HostVector<Data64>(publickey_memory_size);
                 cudaMemcpyAsync(host_locations_.data(),
                                 device_locations_.data(),
@@ -81,7 +99,7 @@ namespace heongpu
                 device_locations_.shrink_to_fit(stream);
             }
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -89,10 +107,15 @@ namespace heongpu
         }
     }
 
-    void Publickey<Scheme::BFV>::save(std::ostream& os) const
+    void Publickey<Scheme::BFV>::save(std::ostream& os,
+                                      serialization_format format) const
     {
         if (public_key_generated_)
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::public_key, scheme_,
+                serialized_context_id());
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
             os.write((char*) &ring_size_, sizeof(ring_size_));
@@ -107,7 +130,7 @@ namespace heongpu
 
             os.write((char*) &storage_type_, sizeof(storage_type_));
 
-            if (storage_type_ == storage_type::DEVICE)
+            if (storage_type_ == storage_type::device)
             {
                 uint32_t publickey_memory_size =
                     2 * coeff_modulus_count_ * ring_size_;
@@ -144,11 +167,25 @@ namespace heongpu
     {
         if ((!public_key_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::public_key,
+                    scheme_type::bfv);
+            detail::validate_loaded_context_identity(
+                serialized_context_id(), loaded_context_id, "Publickey");
+            if (loaded_context_id != 0)
+            {
+                context_id_ = loaded_context_id;
+            }
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
             if (scheme_ != scheme_type::bfv)
             {
-                throw std::runtime_error("Invalid scheme binary!");
+                throw SerializationError(
+                    error_message("Invalid scheme binary! Expected BFV data, "
+                                  "found scheme id ",
+                                  static_cast<int>(scheme_), "."));
             }
 
             is.read((char*) &ring_size_, sizeof(ring_size_));
@@ -163,7 +200,7 @@ namespace heongpu
 
             is.read((char*) &storage_type_, sizeof(storage_type_));
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
             public_key_generated_ = true;
 
             uint32_t publickey_memory_size;
@@ -193,9 +230,9 @@ namespace heongpu
         }
     }
 
-    int Publickey<Scheme::BFV>::memory_size()
+    int Publickey<Scheme::BFV>::memory_size() const
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             return device_locations_.size();
         }
@@ -223,7 +260,7 @@ namespace heongpu
     void
     Publickey<Scheme::BFV>::memory_set(DeviceVector<Data64>&& new_device_vector)
     {
-        storage_type_ = storage_type::DEVICE;
+        storage_type_ = storage_type::device;
         device_locations_ = std::move(new_device_vector);
 
         if (host_locations_.size() > 0)
@@ -235,7 +272,7 @@ namespace heongpu
 
     void Publickey<Scheme::BFV>::copy_to_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -251,18 +288,18 @@ namespace heongpu
                     DeviceVector<Data64>(host_locations_, stream);
             }
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 
     void Publickey<Scheme::BFV>::remove_from_device(cudaStream_t stream)
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             device_locations_.resize(0, stream);
             device_locations_.shrink_to_fit(stream);
 
-            storage_type_ = storage_type::HOST;
+            storage_type_ = storage_type::host;
         }
         else
         {
@@ -272,7 +309,7 @@ namespace heongpu
 
     void Publickey<Scheme::BFV>::remove_from_host()
     {
-        if (storage_type_ == storage_type::DEVICE)
+        if (storage_type_ == storage_type::device)
         {
             // pass
         }
@@ -281,7 +318,7 @@ namespace heongpu
             host_locations_.resize(0);
             host_locations_.shrink_to_fit();
 
-            storage_type_ = storage_type::DEVICE;
+            storage_type_ = storage_type::device;
         }
     }
 

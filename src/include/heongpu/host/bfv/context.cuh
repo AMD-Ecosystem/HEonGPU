@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -61,9 +62,24 @@ namespace heongpu
         void generate();
         void generate(const MemoryPoolConfig& pool_config);
 
-        void print_parameters();
+        /**
+         * @brief Writes the encryption parameters to os, std::cout by
+         * default.
+         */
+        void print_parameters(std::ostream& os = std::cout) const;
+
+        /**
+         * @brief Returns a one line description, for example for logs and
+         * error reports. Also written by operator<<.
+         */
+        std::string to_string() const;
 
         inline int get_poly_modulus_degree() const noexcept { return n; }
+
+        inline sec_level_type get_security_level() const noexcept
+        {
+            return sec_level_;
+        }
 
         inline int get_log_poly_modulus_degree() const noexcept
         {
@@ -90,7 +106,17 @@ namespace heongpu
             return prime_vector_;
         }
 
-        void save(std::ostream& os) const;
+        /**
+         * @brief Returns the identity of the context, computed in generate()
+         * from the parameters the objects of the context depend on. Contexts
+         * generated from the same parameters have the same identity, and
+         * objects can only be used with a context that has the identity of
+         * the context they were created with. Returns 0 before generate().
+         */
+        inline std::uint64_t context_id() const noexcept { return context_id_; }
+
+        void save(std::ostream& os,
+                  serialization_format format = serialization_format::v2) const;
 
         void load(std::istream& is);
 
@@ -174,10 +200,10 @@ namespace heongpu
         bool coeff_modulus_specified_ = false;
         bool plain_modulus_specified_ = false;
         bool context_generated_ = false;
+        std::uint64_t context_id_ = 0;
 
         scheme_type scheme_;
         sec_level_type sec_level_;
-        keyswitching_type keyswitching_type_;
 
         int n;
         int n_power;
@@ -266,7 +292,7 @@ namespace heongpu
         std::shared_ptr<DeviceVector<Data64>> upper_half_threshold_;
         std::shared_ptr<DeviceVector<Data64>> decryption_modulus_;
 
-        // BFV switchkey parameters (Method II)
+        // BFV key switching parameters
         int m;
         int l;
         int l_tilda;
@@ -294,6 +320,12 @@ namespace heongpu
         std::shared_ptr<DeviceVector<int>> I_location_;
         std::shared_ptr<DeviceVector<int>> Sk_pair_;
     };
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContextImpl<Scheme::BFV>& object);
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContext<Scheme::BFV>& context);
 
 } // namespace heongpu
 #endif // HEONGPU_BFV_CONTEXT_H

@@ -1,4 +1,5 @@
-﻿// Copyright 2024-2026 Alişah Özcan
+// Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -9,54 +10,16 @@ namespace heongpu
 {
     // Secret Key Generation
 
-    // Not cryptographically secure, will be fixed later.
-    __global__ void secretkey_gen_kernel(int* secret_key, int hamming_weight,
-                                         int n_power, int seed)
+    __global__ void secretkey_gen_kernel(int* secret_key,
+                                         int* nonzero_positions,
+                                         int* nonzero_values,
+                                         int hamming_weight)
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= hamming_weight)
-            return;
 
-        const int N = 1 << n_power;
-        const int mask = N - 1;
-
-        curandState_t state;
-        curand_init(seed, idx, 0, &state);
-
-        int value = (curand(&state) & 1U) ? 1 : -1; // // -1 or 1
-
-        int start = (int) (curand(&state) & (unsigned) mask);
-
-        for (int probe = 0; probe < N; ++probe)
-        {
-            int loc = (start + probe) & mask;
-            if (atomicCAS(&secret_key[loc], 0, value) == 0)
-                return;
-        }
-    }
-
-    // Collision-free secret key generation
-    __global__ void secretkey_gen_kernel_v2(int* secret_key,
-                                            int* nonzero_positions,
-                                            int* nonzero_values,
-                                            int hamming_weight, int n_power)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
-        int n = 1 << n_power;
-
-        // Initialize all positions to 0
-        if (idx < n)
-        {
-            secret_key[idx] = 0;
-        }
-        __syncthreads();
-
-        // Fill non-zero positions (no collision possible)
         if (idx < hamming_weight)
         {
-            int position = nonzero_positions[idx];
-            int value = nonzero_values[idx];
-            secret_key[position] = value;
+            secret_key[nonzero_positions[idx]] = nonzero_values[idx];
         }
     }
 
@@ -142,93 +105,10 @@ namespace heongpu
     /////////////////////////////////////////////////////////////////////////////////////
     // Relinearization Key Generation
 
-    __global__ void relinkey_gen_kernel(Data64* relin_key, Data64* secret_key,
-                                        Data64* error_poly, Data64* a_poly,
-                                        Modulus64* modulus, Data64* factor,
-                                        int n_power, int rns_mod_count)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
-        int block_y = blockIdx.y; // rns_mod_count
-
-        int location1 = block_y << n_power;
-
-        Data64 sk = secret_key[idx + (block_y << n_power)];
-
-#pragma unroll
-        for (int i = 0; i < rns_mod_count - 1; i++)
-        {
-            Data64 e = error_poly[idx + (block_y << n_power) +
-                                  ((rns_mod_count * i) << n_power)];
-            Data64 a = a_poly[idx + (block_y << n_power) +
-                              ((rns_mod_count * i) << n_power)];
-
-            Data64 rk_0 = OPERATOR_GPU_64::mult(sk, a, modulus[block_y]);
-            rk_0 = OPERATOR_GPU_64::add(rk_0, e, modulus[block_y]);
-            Data64 zero = 0;
-
-            rk_0 = OPERATOR_GPU_64::sub(zero, rk_0, modulus[block_y]);
-
-            if (i == block_y)
-            {
-                Data64 temp = OPERATOR_GPU_64::mult(sk, sk, modulus[block_y]);
-                temp = OPERATOR_GPU_64::mult(temp, factor[block_y],
-                                             modulus[block_y]);
-
-                rk_0 = OPERATOR_GPU_64::add(rk_0, temp, modulus[block_y]);
-            }
-
-            relin_key[idx + location1 +
-                      ((rns_mod_count * i) << (n_power + 1))] = rk_0;
-            relin_key[idx + location1 + ((rns_mod_count * i) << (n_power + 1)) +
-                      (rns_mod_count << n_power)] = a;
-        }
-    }
-
     ////////////////////////
     //////////////////////// -
 
-    __global__ void multi_party_relinkey_piece_method_I_stage_I_kernel(
-        Data64* rk, Data64* sk, Data64* a, Data64* u, Data64* e0, Data64* e1,
-        Modulus64* modulus, Data64* factor, int n_power, int rns_mod_count)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
-        int block_y = blockIdx.y; // rns_mod_count
-
-        int location = block_y << n_power;
-
-        Data64 sk_ = sk[idx + (block_y << n_power)];
-        Data64 u_ = u[idx + (block_y << n_power)];
-
-        Data64 zero = 0ULL;
-#pragma unroll
-        for (int i = 0; i < rns_mod_count - 1; i++)
-        {
-            Data64 e_0 = e0[idx + location + ((rns_mod_count * i) << n_power)];
-            Data64 e_1 = e1[idx + location + ((rns_mod_count * i) << n_power)];
-            Data64 a_ = a[idx + location + ((rns_mod_count * i) << n_power)];
-
-            Data64 rk_0 = OPERATOR_GPU_64::mult(u_, a_, modulus[block_y]);
-            rk_0 = OPERATOR_GPU_64::sub(zero, rk_0, modulus[block_y]);
-            rk_0 = OPERATOR_GPU_64::add(rk_0, e_0, modulus[block_y]);
-
-            if (i == block_y)
-            {
-                Data64 temp = OPERATOR_GPU_64::mult(sk_, factor[block_y],
-                                                    modulus[block_y]);
-
-                rk_0 = OPERATOR_GPU_64::add(rk_0, temp, modulus[block_y]);
-            }
-
-            Data64 rk_1 = OPERATOR_GPU_64::mult(a_, sk_, modulus[block_y]);
-            rk_1 = OPERATOR_GPU_64::add(rk_1, e_1, modulus[block_y]);
-
-            rk[idx + location + ((rns_mod_count * i) << (n_power + 1))] = rk_0;
-            rk[idx + location + ((rns_mod_count * i) << (n_power + 1)) +
-               (rns_mod_count << n_power)] = rk_1;
-        }
-    }
-
-    __global__ void multi_party_relinkey_piece_method_II_stage_I_kernel(
+    __global__ void multi_party_relinkey_piece_stage_I_kernel(
         Data64* rk, Data64* sk, Data64* a, Data64* u, Data64* e0, Data64* e1,
         Modulus64* modulus, Data64* factor, int* Sk_pair, int n_power,
         int l_tilda, int d, int Q_size, int P_size)
@@ -277,7 +157,7 @@ namespace heongpu
         }
     }
 
-    __global__ void multi_party_relinkey_piece_method_I_II_stage_II_kernel(
+    __global__ void multi_party_relinkey_piece_stage_II_kernel(
         Data64* rk_1, Data64* rk_2, Data64* sk, Data64* u, Data64* e0,
         Data64* e1, Modulus64* modulus, int n_power, int rns_mod_count,
         int decomp_mod_count)
@@ -318,9 +198,10 @@ namespace heongpu
         }
     }
 
-    __global__ void multi_party_relinkey_method_I_stage_I_kernel(
-        Data64* rk1, Data64* rk2, Data64* rk_out, Modulus64* modulus,
-        int n_power, int Q_prime_size, int l)
+    __global__ void
+    multi_party_relinkey_stage_I_kernel(Data64* rk1, Data64* rk2,
+                                        Data64* rk_out, Modulus64* modulus,
+                                        int n_power, int Q_prime_size, int l)
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
         int block_y = blockIdx.y; // rns_mod_count
@@ -351,9 +232,10 @@ namespace heongpu
         }
     }
 
-    __global__ void multi_party_relinkey_method_I_stage_I_kernel(
-        Data64* rk_in, Data64* rk_out, Modulus64* modulus, int n_power,
-        int Q_prime_size, int l, bool first)
+    __global__ void
+    multi_party_relinkey_stage_I_kernel(Data64* rk_in, Data64* rk_out,
+                                        Modulus64* modulus, int n_power,
+                                        int Q_prime_size, int l, bool first)
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
         int block_y = blockIdx.y; // rns_mod_count
@@ -402,9 +284,10 @@ namespace heongpu
         }
     }
 
-    __global__ void multi_party_relinkey_method_I_stage_II_kernel(
-        Data64* rk1, Data64* rk2, Data64* rk_out, Modulus64* modulus,
-        int n_power, int Q_prime_size, int l)
+    __global__ void
+    multi_party_relinkey_stage_II_kernel(Data64* rk1, Data64* rk2,
+                                         Data64* rk_out, Modulus64* modulus,
+                                         int n_power, int Q_prime_size, int l)
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
         int block_y = blockIdx.y; // rns_mod_count
@@ -431,9 +314,10 @@ namespace heongpu
         }
     }
 
-    __global__ void multi_party_relinkey_method_I_stage_II_kernel(
-        Data64* rk_in, Data64* rk_out, Modulus64* modulus, int n_power,
-        int Q_prime_size, int l)
+    __global__ void
+    multi_party_relinkey_stage_II_kernel(Data64* rk_in, Data64* rk_out,
+                                         Modulus64* modulus, int n_power,
+                                         int Q_prime_size, int l)
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
         int block_y = blockIdx.y; // rns_mod_count
@@ -698,10 +582,10 @@ namespace heongpu
 
             if (pos_steps >= (n >> 1))
             {
-                std::cerr
-                    << "Galois Key can not be generated, Step count too large "
-                    << std::endl;
-                return 0;
+                throw ParameterError(error_message(
+                    "Invalid rotation step ", steps,
+                    "! A Galois key step must be smaller than the row size ",
+                    n >> 1, " in absolute value."));
             }
 
             if (sign)
@@ -752,56 +636,6 @@ namespace heongpu
         index_raw = index_raw & coeff_count_minus_one;
 
         return bitreverse_gpu(index_raw, n_power);
-    }
-
-    __global__ void galoiskey_gen_kernel(Data64* galois_key, Data64* secret_key,
-                                         Data64* error_poly, Data64* a_poly,
-                                         Modulus64* modulus, Data64* factor,
-                                         int galois_elt, int n_power,
-                                         int rns_mod_count)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
-        int block_y = blockIdx.y; // rns_mod_count
-
-        int location1 = block_y << n_power;
-        int coeff_count = 1 << n_power;
-
-        int permutation_location =
-            permutation(idx, galois_elt, coeff_count, n_power);
-        Data64 sk_permutation =
-            secret_key[(block_y << n_power) + permutation_location];
-
-#pragma unroll
-        for (int i = 0; i < rns_mod_count - 1; i++)
-        {
-            Data64 e = error_poly[idx + (block_y << n_power) +
-                                  ((rns_mod_count * i) << n_power)];
-            Data64 a = a_poly[idx + (block_y << n_power) +
-                              ((rns_mod_count * i) << n_power)];
-
-            Data64 gk_0 =
-                OPERATOR_GPU_64::mult(sk_permutation, a, modulus[block_y]);
-            gk_0 = OPERATOR_GPU_64::add(gk_0, e, modulus[block_y]);
-            Data64 zero = 0;
-
-            gk_0 = OPERATOR_GPU_64::sub(zero, gk_0, modulus[block_y]);
-
-            if (i == block_y)
-            {
-                Data64 sk = secret_key[idx + (block_y << n_power)];
-
-                sk = OPERATOR_GPU_64::mult(sk, factor[block_y],
-                                           modulus[block_y]);
-
-                gk_0 = OPERATOR_GPU_64::add(gk_0, sk, modulus[block_y]);
-            }
-
-            galois_key[idx + location1 +
-                       ((rns_mod_count * i) << (n_power + 1))] = gk_0;
-            galois_key[idx + location1 +
-                       ((rns_mod_count * i) << (n_power + 1)) +
-                       (rns_mod_count << n_power)] = a;
-        }
     }
 
     __global__ void galoiskey_gen_II_kernel(
@@ -858,7 +692,7 @@ namespace heongpu
 
     /////////////////////
 
-    __global__ void multi_party_galoiskey_gen_method_I_II_kernel(
+    __global__ void multi_party_galoiskey_gen_kernel(
         Data64* gk_1, Data64* gk_2, Modulus64* modulus, int n_power,
         int rns_mod_count, int decomp_mod_count, bool first)
     {
@@ -892,51 +726,6 @@ namespace heongpu
     }
 
     /////////////////////
-
-    __global__ void switchkey_gen_kernel(Data64* switch_key,
-                                         Data64* new_secret_key,
-                                         Data64* old_secret_key,
-                                         Data64* error_poly, Data64* a_poly,
-                                         Modulus64* modulus, Data64* factor,
-                                         int n_power, int rns_mod_count)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x; // Ring Sizes
-        int block_y = blockIdx.y; // rns_mod_count
-
-        int location1 = block_y << n_power;
-
-        Data64 new_sk = new_secret_key[idx + (block_y << n_power)];
-        Data64 old_sk = old_secret_key[idx + (block_y << n_power)];
-
-#pragma unroll
-        for (int i = 0; i < rns_mod_count - 1; i++)
-        {
-            Data64 e = error_poly[idx + (block_y << n_power) +
-                                  ((rns_mod_count * i) << n_power)];
-            Data64 a = a_poly[idx + (block_y << n_power) +
-                              ((rns_mod_count * i) << n_power)];
-
-            Data64 rk_0 = OPERATOR_GPU_64::mult(new_sk, a, modulus[block_y]);
-            rk_0 = OPERATOR_GPU_64::add(rk_0, e, modulus[block_y]);
-            Data64 zero = 0;
-
-            rk_0 = OPERATOR_GPU_64::sub(zero, rk_0, modulus[block_y]);
-
-            if (i == block_y)
-            {
-                Data64 temp = OPERATOR_GPU_64::mult(old_sk, factor[block_y],
-                                                    modulus[block_y]);
-
-                rk_0 = OPERATOR_GPU_64::add(rk_0, temp, modulus[block_y]);
-            }
-
-            switch_key[idx + location1 +
-                       ((rns_mod_count * i) << (n_power + 1))] = rk_0;
-            switch_key[idx + location1 +
-                       ((rns_mod_count * i) << (n_power + 1)) +
-                       (rns_mod_count << n_power)] = a;
-        }
-    }
 
     __global__ void switchkey_gen_II_kernel(
         Data64* switch_key, Data64* new_secret_key, Data64* old_secret_key,
@@ -1028,54 +817,6 @@ namespace heongpu
         }
     }
 
-    // Not cryptographically secure, will be fixed later.
-    __global__ void tfhe_secretkey_gen_kernel(int32_t* secret_key, int size,
-                                              int seed)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx >= size)
-            return;
-
-        curandState_t state;
-        curand_init(seed, idx, 0, &state);
-
-        int32_t value = (curand(&state) & 1); // 0 or 1
-        secret_key[idx] = value;
-    }
-
-    __global__ void tfhe_generate_noise_kernel(double* output, int seed, int n,
-                                               double stddev)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n)
-        {
-            curandState_t thread_state;
-            curand_init(seed, idx, 0, &thread_state);
-
-            double z = curand_normal_double(&thread_state);
-
-            output[idx] = stddev * z;
-        }
-    }
-
-    __global__ void tfhe_generate_uniform_random_number_kernel(int32_t* output,
-                                                               int seed, int n)
-    {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n)
-        {
-            curandState_t thread_state;
-            curand_init(seed, idx, 0, &thread_state);
-
-            int32_t result = curand(&thread_state);
-
-            output[idx] = result;
-        }
-    }
-
     __global__ void tfhe_generate_switchkey_kernel(
         const int32_t* sk_rlwe, const int32_t* sk_lwe, const double* noise,
         int32_t* input_a, int32_t* output_b, int n, int base_bit, int length)
@@ -1136,75 +877,19 @@ namespace heongpu
                             offset_b + offset_in_b + base_index;
 
                         double noise_reg = noise[output_b_index];
-                        // Make it efficient
+                        // Round in a signed type before reducing modulo 2^32.
+                        // Casting a negative floating point value directly to
+                        // uint32_t is undefined behavior (on the device it
+                        // gives 0, which made the noise one-sided).
                         double frac = noise_reg - trunc(noise_reg);
-                        double x = frac * 4294967296.0; // 1ULL<<32 = 4294967296
-                        uint32_t u = static_cast<uint32_t>(floor(x + 0.5));
+                        uint32_t u =
+                            static_cast<uint32_t>(llround(frac * 4294967296.0));
 
                         output_b[output_b_index] = static_cast<int32_t>(
                             block_sum + message + static_cast<int32_t>(u));
                     }
                 }
                 __syncthreads();
-            }
-        }
-    }
-
-    __global__ void tfhe_generate_bootkey_random_numbers_kernel(
-        int32_t* boot_key, int N, int k, int bk_length, int seed, double stddev)
-    {
-        const int idx_x = threadIdx.x;
-        const int block_x = blockIdx.x;
-        const int g_idx = block_x * blockDim.x + idx_x;
-
-        const int N_reg = N;
-        const int k_reg = k;
-        const int length_reg = bk_length;
-
-        const double stddev_reg = stddev;
-
-        curandState_t thread_state;
-        curand_init(seed, g_idx, 0, &thread_state);
-
-        Data64 offset_block = block_x * (Data64) (k_reg + 1) *
-                              ((Data64) length_reg * (k_reg + 1) * N_reg);
-
-        for (int loop1 = 0; loop1 < (k_reg + 1); loop1++)
-        {
-            int offset1 = loop1 * (length_reg * (k_reg + 1) * N_reg);
-
-            for (int loop2 = 0; loop2 < length_reg; loop2++)
-            {
-                int offset2 = loop2 * ((k_reg + 1) * N_reg);
-
-                for (int loop3 = 0; loop3 < k_reg; loop3++) // (k_reg + 1)
-                {
-                    Data64 offset = offset_block + offset1 + offset2;
-                    offset = offset + (loop3 * N_reg);
-
-                    boot_key[offset + idx_x] = curand(&thread_state);
-                    boot_key[offset + idx_x + blockDim.x] =
-                        curand(&thread_state);
-                }
-
-                Data64 offset = offset_block + offset1 + offset2;
-                offset = offset + (k_reg * N_reg);
-
-                double r0 = curand_normal_double(&thread_state);
-                double r1 = curand_normal_double(&thread_state);
-                r0 = r0 * stddev_reg;
-                r1 = r1 * stddev_reg;
-
-                double frac0 = r0 - trunc(r0);
-                double frac1 = r1 - trunc(r1);
-                double x0 = frac0 * 4294967296.0;
-                double x1 = frac1 * 4294967296.0;
-                uint32_t u0 = static_cast<uint32_t>(floor(x0 + 0.5));
-                uint32_t u1 = static_cast<uint32_t>(floor(x1 + 0.5));
-
-                boot_key[offset + idx_x] = static_cast<int32_t>(u0);
-                boot_key[offset + idx_x + blockDim.x] =
-                    static_cast<int32_t>(u1);
             }
         }
     }

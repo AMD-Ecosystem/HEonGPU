@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -47,16 +48,14 @@ namespace heongpu
         __host__ HEKeyGenerator(HEContext<Scheme::CKKS> context);
 
         /**
-         * @brief Generates a secret key.
+         * @brief Generates a secret key using cryptographic private randomness.
+         * The legacy seed value does not control secret key sampling.
+         * Throws if the cryptographic random generator fails.
          *
          * @param sk Reference to the Secretkey object where the generated
          * secret key will be stored.
          */
         __host__ void generate_secret_key(
-            Secretkey<Scheme::CKKS>& sk,
-            const ExecutionOptions& options = ExecutionOptions());
-
-        __host__ void generate_secret_key_v2(
             Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions());
 
@@ -69,7 +68,7 @@ namespace heongpu
          * public key.
          */
         __host__ void generate_public_key(
-            Publickey<Scheme::CKKS>& pk, Secretkey<Scheme::CKKS>& sk,
+            Publickey<Scheme::CKKS>& pk, const Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions());
 
         /**
@@ -82,21 +81,10 @@ namespace heongpu
          */
         __host__ void
         generate_relin_key(Relinkey<Scheme::CKKS>& rk,
-                           Secretkey<Scheme::CKKS>& sk,
+                           const Secretkey<Scheme::CKKS>& sk,
                            const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(rk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_relin_key_method_I(rk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_ckks_relin_key_method_II(rk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            generate_ckks_relin_key(rk, sk, options);
         }
 
         /**
@@ -108,21 +96,10 @@ namespace heongpu
          * Galois key.
          */
         __host__ void generate_galois_key(
-            Galoiskey<Scheme::CKKS>& gk, Secretkey<Scheme::CKKS>& sk,
+            Galoiskey<Scheme::CKKS>& gk, const Secretkey<Scheme::CKKS>& sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(gk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_galois_key_method_I(gk, sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_ckks_galois_key_method_II(gk, sk, options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            generate_ckks_galois_key(gk, sk, options);
         }
 
         /**
@@ -135,48 +112,12 @@ namespace heongpu
          * @param old_sk Reference to the old Secretkey object to switch from.
          */
         __host__ void generate_switch_key(
-            Switchkey<Scheme::CKKS>& swk, Secretkey<Scheme::CKKS>& new_sk,
-            Secretkey<Scheme::CKKS>& old_sk,
+            Switchkey<Scheme::CKKS>& swk, const Secretkey<Scheme::CKKS>& new_sk,
+            const Secretkey<Scheme::CKKS>& old_sk,
             const ExecutionOptions& options = ExecutionOptions())
         {
-            switch (static_cast<int>(swk.key_type))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    generate_switch_key_method_I(swk, new_sk, old_sk, options);
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                    generate_ckks_switch_key_method_II(swk, new_sk, old_sk,
-                                                       options);
-                    break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            generate_ckks_switch_key(swk, new_sk, old_sk, options);
         }
-
-        /**
-         * @brief Returns the seed of the key generator.
-         *
-         * @return int Seed of the key generator.
-         */
-        inline int get_seed() const noexcept { return seed_; }
-
-        /**
-         * @brief Sets the seed of the key generator with new seed.
-         */
-        inline void set_seed(int new_seed) { seed_ = new_seed; }
-
-        /**
-         * @brief Returns the offset of the key generator(curand).
-         *
-         * @return int Offset of the key generator.
-         */
-        inline int get_offset() const noexcept { return offset_; }
-
-        /**
-         * @brief Sets the offset of the key generator with new offset(curand).
-         */
-        inline void set_offset(int new_offset) { offset_ = new_offset; }
 
         HEKeyGenerator() = delete;
         HEKeyGenerator(const HEKeyGenerator& copy) = delete;
@@ -184,39 +125,117 @@ namespace heongpu
         HEKeyGenerator& operator=(const HEKeyGenerator& assign) = delete;
         HEKeyGenerator& operator=(HEKeyGenerator&& assign) = delete;
 
+        // Value-returning versions of the functions above. They give the
+        // same results.
+
+        /**
+         * @brief Returns a new secret key; see generate_secret_key.
+         */
+        __host__ Secretkey<Scheme::CKKS>
+        secret_key(const ExecutionOptions& options = ExecutionOptions())
+        {
+            Secretkey<Scheme::CKKS> output(context_);
+            generate_secret_key(output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Publickey of sk; see generate_public_key.
+         */
+        __host__ Publickey<Scheme::CKKS>
+        public_key(const Secretkey<Scheme::CKKS>& sk,
+                   const ExecutionOptions& options = ExecutionOptions())
+        {
+            Publickey<Scheme::CKKS> output(context_);
+            generate_public_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Relinkey of sk; see generate_relin_key.
+         */
+        __host__ Relinkey<Scheme::CKKS>
+        relin_key(const Secretkey<Scheme::CKKS>& sk,
+                  const ExecutionOptions& options = ExecutionOptions())
+        {
+            Relinkey<Scheme::CKKS> output(context_);
+            generate_relin_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Galoiskey of sk; see generate_galois_key.
+         */
+        __host__ Galoiskey<Scheme::CKKS>
+        galois_key(const Secretkey<Scheme::CKKS>& sk,
+                   const ExecutionOptions& options = ExecutionOptions())
+        {
+            Galoiskey<Scheme::CKKS> output(context_);
+            generate_galois_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns a new Galoiskey of sk for the given shifts; see
+         * generate_galois_key.
+         */
+        __host__ Galoiskey<Scheme::CKKS>
+        galois_key(const Secretkey<Scheme::CKKS>& sk, std::vector<int>& shifts,
+                   const ExecutionOptions& options = ExecutionOptions())
+        {
+            Galoiskey<Scheme::CKKS> output(context_, shifts);
+            generate_galois_key(output, sk, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns the keys CKKS bootstrapping uses: a Relinkey of sk,
+         * a Galoiskey of sk for galois_shifts (the bootstrapping_key_indices()
+         * of the operator) and, unless sparse_secret_key_hamming_weight is 0,
+         * the switch keys between sk and a new sparse secret key with that
+         * Hamming weight.
+         */
+        __host__ CKKSBootstrappingKeys bootstrapping_keys(
+            const Secretkey<Scheme::CKKS>& sk, std::vector<int> galois_shifts,
+            int sparse_secret_key_hamming_weight = 0,
+            const ExecutionOptions& options = ExecutionOptions())
+        {
+            CKKSBootstrappingKeys keys{relin_key(sk, options),
+                                       galois_key(sk, galois_shifts, options),
+                                       std::nullopt, std::nullopt};
+            if (sparse_secret_key_hamming_weight > 0)
+            {
+                Secretkey<Scheme::CKKS> sparse_sk(
+                    context_, sparse_secret_key_hamming_weight);
+                generate_secret_key(sparse_sk, options);
+                keys.dense_to_sparse.emplace(context_);
+                generate_switch_key(*keys.dense_to_sparse, sparse_sk, sk,
+                                    options);
+                keys.sparse_to_dense.emplace(context_);
+                generate_switch_key(*keys.sparse_to_dense, sk, sparse_sk,
+                                    options);
+            }
+            return keys;
+        }
+
       private:
-        __host__ void
-        generate_relin_key_method_I(Relinkey<Scheme::CKKS>& rk,
-                                    Secretkey<Scheme::CKKS>& sk,
-                                    const ExecutionOptions& options);
+        __host__ void generate_ckks_relin_key(Relinkey<Scheme::CKKS>& rk,
+                                              const Secretkey<Scheme::CKKS>& sk,
+                                              const ExecutionOptions& options);
 
         __host__ void
-        generate_ckks_relin_key_method_II(Relinkey<Scheme::CKKS>& rk,
-                                          Secretkey<Scheme::CKKS>& sk,
-                                          const ExecutionOptions& options);
+        generate_ckks_galois_key(Galoiskey<Scheme::CKKS>& gk,
+                                 const Secretkey<Scheme::CKKS>& sk,
+                                 const ExecutionOptions& options);
 
         __host__ void
-        generate_galois_key_method_I(Galoiskey<Scheme::CKKS>& gk,
-                                     Secretkey<Scheme::CKKS>& sk,
-                                     const ExecutionOptions& options);
-
-        __host__ void
-        generate_ckks_galois_key_method_II(Galoiskey<Scheme::CKKS>& gk,
-                                           Secretkey<Scheme::CKKS>& sk,
-                                           const ExecutionOptions& options);
-
-        __host__ void generate_switch_key_method_I(
-            Switchkey<Scheme::CKKS>& swk, Secretkey<Scheme::CKKS>& new_sk,
-            Secretkey<Scheme::CKKS>& old_sk, const ExecutionOptions& options);
-
-        __host__ void generate_ckks_switch_key_method_II(
-            Switchkey<Scheme::CKKS>& swk, Secretkey<Scheme::CKKS>& new_sk,
-            Secretkey<Scheme::CKKS>& old_sk, const ExecutionOptions& options);
+        generate_ckks_switch_key(Switchkey<Scheme::CKKS>& swk,
+                                 const Secretkey<Scheme::CKKS>& new_sk,
+                                 const Secretkey<Scheme::CKKS>& old_sk,
+                                 const ExecutionOptions& options);
 
       private:
         HEContext<Scheme::CKKS> context_;
-        int seed_;
-        int offset_; // Absolute offset into sequence (curand)
 
         RNGSeed new_seed_;
     };

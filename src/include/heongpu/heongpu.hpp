@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -18,6 +19,8 @@
 #include <heongpu/host/bfv/decryptor.cuh>
 #include <heongpu/host/bfv/operator.cuh>
 #include <heongpu/host/bfv/mpcmanager.cuh>
+#include <heongpu/host/bfv/parameters.cuh>
+#include <heongpu/host/bfv/session.cuh>
 
 #include <heongpu/host/ckks/context.cuh>
 #include <heongpu/host/ckks/secretkey.cuh>
@@ -31,7 +34,10 @@
 #include <heongpu/host/ckks/decryptor.cuh>
 #include <heongpu/host/ckks/operator.cuh>
 #include <heongpu/host/ckks/mpcmanager.cuh>
+#include <heongpu/host/ckks/parameters.cuh>
 #include <heongpu/host/ckks/precision.cuh>
+#include <heongpu/host/ckks/session.cuh>
+#include <heongpu/host/session_logic.cuh>
 
 #include <heongpu/host/tfhe/context.cuh>
 #include <heongpu/host/tfhe/secretkey.cuh>
@@ -43,6 +49,7 @@
 #include <heongpu/host/tfhe/operator.cuh>
 
 #include <heongpu/util/serializer.h>
+#include <heongpu/util/runtime.cuh>
 
 namespace heongpu
 {

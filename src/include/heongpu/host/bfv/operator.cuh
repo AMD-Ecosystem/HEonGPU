@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -54,8 +55,8 @@ namespace heongpu
          * @param input2 Second input ciphertext to be added.
          * @param output Ciphertext where the result of the addition is stored.
          */
-        __host__ void add(Ciphertext<Scheme::BFV>& input1,
-                          Ciphertext<Scheme::BFV>& input2,
+        __host__ void add(const Ciphertext<Scheme::BFV>& input1,
+                          const Ciphertext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
                           const ExecutionOptions& options = ExecutionOptions());
 
@@ -69,9 +70,12 @@ namespace heongpu
          */
         __host__ void
         add_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Ciphertext<Scheme::BFV>& input2,
+                    const Ciphertext<Scheme::BFV>& input2,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             add(input1, input2, input1, options);
         }
 
@@ -84,8 +88,8 @@ namespace heongpu
          * @param output Ciphertext where the result of the subtraction is
          * stored.
          */
-        __host__ void sub(Ciphertext<Scheme::BFV>& input1,
-                          Ciphertext<Scheme::BFV>& input2,
+        __host__ void sub(const Ciphertext<Scheme::BFV>& input1,
+                          const Ciphertext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
                           const ExecutionOptions& options = ExecutionOptions());
 
@@ -98,9 +102,12 @@ namespace heongpu
          */
         __host__ void
         sub_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Ciphertext<Scheme::BFV>& input2,
+                    const Ciphertext<Scheme::BFV>& input2,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             sub(input1, input2, input1, options);
         }
 
@@ -111,7 +118,8 @@ namespace heongpu
          * @param output Ciphertext where the result of the negation is stored.
          */
         __host__ void
-        negate(Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
+        negate(const Ciphertext<Scheme::BFV>& input1,
+               Ciphertext<Scheme::BFV>& output,
                const ExecutionOptions& options = ExecutionOptions());
 
         /**
@@ -123,6 +131,8 @@ namespace heongpu
         negate_inplace(Ciphertext<Scheme::BFV>& input1,
                        const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             negate(input1, input1, options);
         }
 
@@ -135,11 +145,14 @@ namespace heongpu
          * @param output Ciphertext where the result of the addition is stored.
          */
         __host__ void
-        add_plain(Ciphertext<Scheme::BFV>& input1,
-                  Plaintext<Scheme::BFV>& input2,
+        add_plain(const Ciphertext<Scheme::BFV>& input1,
+                  const Plaintext<Scheme::BFV>& input2,
                   Ciphertext<Scheme::BFV>& output,
                   const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -172,6 +185,7 @@ namespace heongpu
                                                   options.stream_);
 
                                     output_.scheme_ = context_->scheme_;
+                                    output_.context_id_ = context_->context_id_;
                                     output_.ring_size_ = context_->n;
                                     output_.coeff_modulus_count_ =
                                         context_->Q_size;
@@ -198,9 +212,12 @@ namespace heongpu
          */
         __host__ void
         add_plain_inplace(Ciphertext<Scheme::BFV>& input1,
-                          Plaintext<Scheme::BFV>& input2,
+                          const Plaintext<Scheme::BFV>& input2,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -240,11 +257,14 @@ namespace heongpu
          * stored.
          */
         __host__ void
-        sub_plain(Ciphertext<Scheme::BFV>& input1,
-                  Plaintext<Scheme::BFV>& input2,
+        sub_plain(const Ciphertext<Scheme::BFV>& input1,
+                  const Plaintext<Scheme::BFV>& input2,
                   Ciphertext<Scheme::BFV>& output,
                   const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -277,6 +297,7 @@ namespace heongpu
                                                   options.stream_);
 
                                     output_.scheme_ = context_->scheme_;
+                                    output_.context_id_ = context_->context_id_;
                                     output_.ring_size_ = context_->n;
                                     output_.coeff_modulus_count_ =
                                         context_->Q_size;
@@ -303,9 +324,12 @@ namespace heongpu
          */
         __host__ void
         sub_plain_inplace(Ciphertext<Scheme::BFV>& input1,
-                          Plaintext<Scheme::BFV>& input2,
+                          const Plaintext<Scheme::BFV>& input2,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -345,11 +369,14 @@ namespace heongpu
          * stored.
          */
         __host__ void
-        multiply(Ciphertext<Scheme::BFV>& input1,
-                 Ciphertext<Scheme::BFV>& input2,
+        multiply(const Ciphertext<Scheme::BFV>& input1,
+                 const Ciphertext<Scheme::BFV>& input2,
                  Ciphertext<Scheme::BFV>& output,
                  const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             if (input1.relinearization_required_ ||
                 input2.relinearization_required_)
             {
@@ -374,6 +401,7 @@ namespace heongpu
                                                  options.stream_);
 
                                     output_.scheme_ = context_->scheme_;
+                                    output_.context_id_ = context_->context_id_;
                                     output_.ring_size_ = context_->n;
                                     output_.coeff_modulus_count_ =
                                         context_->Q_size;
@@ -400,9 +428,12 @@ namespace heongpu
          */
         __host__ void
         multiply_inplace(Ciphertext<Scheme::BFV>& input1,
-                         Ciphertext<Scheme::BFV>& input2,
+                         const Ciphertext<Scheme::BFV>& input2,
                          const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             multiply(input1, input2, input1, options);
         }
 
@@ -416,11 +447,14 @@ namespace heongpu
          * stored.
          */
         __host__ void
-        multiply_plain(Ciphertext<Scheme::BFV>& input1,
-                       Plaintext<Scheme::BFV>& input2,
+        multiply_plain(const Ciphertext<Scheme::BFV>& input1,
+                       const Plaintext<Scheme::BFV>& input2,
                        Ciphertext<Scheme::BFV>& output,
                        const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -431,7 +465,10 @@ namespace heongpu
 
             if (input1.memory_size() < (2 * context_->n * context_->Q_size))
             {
-                throw std::invalid_argument("Invalid Ciphertexts size!");
+                throw ParameterError(error_message(
+                    "Invalid Ciphertexts size! Expected at least ",
+                    (2 * context_->n * context_->Q_size), " coefficients, got ",
+                    input1.memory_size(), "."));
             }
 
             input_storage_manager(
@@ -458,8 +495,11 @@ namespace heongpu
 
                                     if (input2_.size() < context_->n)
                                     {
-                                        throw std::invalid_argument(
-                                            "Invalid Plaintext size!");
+                                        throw ParameterError(error_message(
+                                            "Invalid Plaintext size! Expected "
+                                            "at least ",
+                                            context_->n, " coefficients, got ",
+                                            input2_.size(), "."));
                                     }
 
                                     multiply_plain_bfv(input1_, input2_,
@@ -467,6 +507,7 @@ namespace heongpu
                                                        options.stream_);
 
                                     output_.scheme_ = context_->scheme_;
+                                    output_.context_id_ = context_->context_id_;
                                     output_.ring_size_ = context_->n;
                                     output_.coeff_modulus_count_ =
                                         context_->Q_size;
@@ -493,9 +534,13 @@ namespace heongpu
          * @param input2 Plaintext to be multiplied with the ciphertext.
          */
         __host__ void multiply_plain_inplace(
-            Ciphertext<Scheme::BFV>& input1, Plaintext<Scheme::BFV>& input2,
+            Ciphertext<Scheme::BFV>& input1,
+            const Plaintext<Scheme::BFV>& input2,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             multiply_plain(input1, input2, input1, options);
         }
 
@@ -507,9 +552,13 @@ namespace heongpu
          * @param relin_key The Relinkey object used for relinearization.
          */
         __host__ void relinearize_inplace(
-            Ciphertext<Scheme::BFV>& input1, Relinkey<Scheme::BFV>& relin_key,
+            Ciphertext<Scheme::BFV>& input1,
+            const Relinkey<Scheme::BFV>& relin_key,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            relin_key.validate_context(context_);
+
             if ((!input1.relinearization_required_))
             {
                 throw std::invalid_argument(
@@ -519,44 +568,24 @@ namespace heongpu
 
             if (input1.memory_size() < (3 * context_->n * context_->Q_size))
             {
-                throw std::invalid_argument("Invalid Ciphertexts size!");
+                throw ParameterError(error_message(
+                    "Invalid Ciphertexts size! Expected at least ",
+                    (3 * context_->n * context_->Q_size), " coefficients, got ",
+                    input1.memory_size(), "."));
             }
 
             input_storage_manager(
                 input1,
                 [&](Ciphertext<Scheme::BFV>& input1_)
                 {
-                    switch (static_cast<int>(relin_key.key_type))
+                    if (input1_.in_ntt_domain_ != false)
                     {
-                        case 1: // KEYSWITCHING_METHOD_I
-
-                            if (input1_.in_ntt_domain_ != false)
-                            {
-                                throw std::invalid_argument(
-                                    "Ciphertext should be in intt domain");
-                            }
-
-                            relinearize_seal_method_inplace(input1_, relin_key,
-                                                            options.stream_);
-
-                            break;
-                        case 2: // KEYSWITCHING_METHOD_II
-
-                            if (input1_.in_ntt_domain_ != false)
-                            {
-                                throw std::invalid_argument(
-                                    "Ciphertext should be in intt domain");
-                            }
-
-                            relinearize_external_product_method2_inplace(
-                                input1_, relin_key, options.stream_);
-
-                            break;
-                        default:
-                            throw std::invalid_argument(
-                                "Invalid Key Switching Type");
-                            break;
+                        throw std::invalid_argument(
+                            "Ciphertext should be in intt domain");
                     }
+
+                    relinearize_external_product_inplace(input1_, relin_key,
+                                                         options.stream_);
 
                     input1_.relinearization_required_ = false;
                 },
@@ -573,21 +602,30 @@ namespace heongpu
          * @param shift Number of positions to shift the rows.
          */
         __host__ void
-        rotate_rows(Ciphertext<Scheme::BFV>& input1,
+        rotate_rows(const Ciphertext<Scheme::BFV>& input1,
                     Ciphertext<Scheme::BFV>& output,
-                    Galoiskey<Scheme::BFV>& galois_key, int shift,
+                    const Galoiskey<Scheme::BFV>& galois_key, int shift,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            galois_key.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
-                throw std::invalid_argument("Ciphertext can not be rotated!");
+                throw StateError("Ciphertext can not be rotated! "
+                                 "Relinearize it first.");
             }
 
             if (input1.memory_size() < (2 * context_->n * context_->Q_size))
             {
-                throw std::invalid_argument("Invalid Ciphertexts size!");
+                throw ParameterError(error_message(
+                    "Invalid Ciphertexts size! Expected at least ",
+                    (2 * context_->n * context_->Q_size), " coefficients, got ",
+                    input1.memory_size(), "."));
             }
 
+            // Rotating by a multiple of the row size gives the input.
+            shift %= (context_->n >> 1);
             if (shift == 0)
             {
                 output = input1;
@@ -602,43 +640,18 @@ namespace heongpu
                         output,
                         [&](Ciphertext<Scheme::BFV>& output_)
                         {
-                            switch (static_cast<int>(galois_key.key_type))
+                            if (input1_.in_ntt_domain_ != false)
                             {
-                                case 1: // KEYSWITCHING_METHOD_I
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    rotate_method_I(input1_, output_,
-                                                    galois_key, shift,
-                                                    options.stream_);
-
-                                    break;
-                                case 2: // KEYSWITCHING_METHOD_II
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    rotate_method_II(input1_, output_,
-                                                     galois_key, shift,
-                                                     options.stream_);
-
-                                    break;
-                                default:
-                                    throw std::invalid_argument(
-                                        "Invalid Key Switching Type");
-                                    break;
+                                throw std::invalid_argument(
+                                    "Ciphertext should be in intt "
+                                    "domain");
                             }
 
+                            rotate_bfv(input1_, output_, galois_key, shift,
+                                       options.stream_);
+
                             output_.scheme_ = context_->scheme_;
+                            output_.context_id_ = context_->context_id_;
                             output_.ring_size_ = context_->n;
                             output_.coeff_modulus_count_ = context_->Q_size;
                             output_.cipher_size_ = 2;
@@ -661,9 +674,13 @@ namespace heongpu
          * @param shift Number of positions to shift the rows.
          */
         __host__ void rotate_rows_inplace(
-            Ciphertext<Scheme::BFV>& input1, Galoiskey<Scheme::BFV>& galois_key,
-            int shift, const ExecutionOptions& options = ExecutionOptions())
+            Ciphertext<Scheme::BFV>& input1,
+            const Galoiskey<Scheme::BFV>& galois_key, int shift,
+            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            galois_key.validate_context(context_);
+
             if (shift == 0)
             {
                 return;
@@ -681,19 +698,26 @@ namespace heongpu
          * @param galois_key Galois key used for the rotation operation.
          */
         __host__ void
-        rotate_columns(Ciphertext<Scheme::BFV>& input1,
+        rotate_columns(const Ciphertext<Scheme::BFV>& input1,
                        Ciphertext<Scheme::BFV>& output,
-                       Galoiskey<Scheme::BFV>& galois_key,
+                       const Galoiskey<Scheme::BFV>& galois_key,
                        const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            galois_key.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
-                throw std::invalid_argument("Ciphertext can not be rotated!");
+                throw StateError("Ciphertext can not be rotated! "
+                                 "Relinearize it first.");
             }
 
             if (input1.memory_size() < (2 * context_->n * context_->Q_size))
             {
-                throw std::invalid_argument("Invalid Ciphertexts size!");
+                throw ParameterError(error_message(
+                    "Invalid Ciphertexts size! Expected at least ",
+                    (2 * context_->n * context_->Q_size), " coefficients, got ",
+                    input1.memory_size(), "."));
             }
 
             input_storage_manager(
@@ -704,36 +728,11 @@ namespace heongpu
                         output,
                         [&](Ciphertext<Scheme::BFV>& output_)
                         {
-                            switch (static_cast<int>(galois_key.key_type))
-                            {
-                                case 1: // KEYSWITCHING_METHOD_I
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    rotate_columns_method_I(input1_, output_,
-                                                            galois_key,
-                                                            options.stream_);
-
-                                    break;
-                                case 2: // KEYSWITCHING_METHOD_II
-
-                                    rotate_columns_method_II(input1_, output_,
-                                                             galois_key,
-                                                             options.stream_);
-
-                                    break;
-                                default:
-                                    throw std::invalid_argument(
-                                        "Invalid Key Switching Type");
-                                    break;
-                            }
+                            rotate_columns_bfv(input1_, output_, galois_key,
+                                               options.stream_);
 
                             output_.scheme_ = context_->scheme_;
+                            output_.context_id_ = context_->context_id_;
                             output_.ring_size_ = context_->n;
                             output_.coeff_modulus_count_ = context_->Q_size;
                             output_.cipher_size_ = 2;
@@ -759,19 +758,26 @@ namespace heongpu
          * @param galois_elt The Galois element to apply.
          */
         __host__ void
-        apply_galois(Ciphertext<Scheme::BFV>& input1,
+        apply_galois(const Ciphertext<Scheme::BFV>& input1,
                      Ciphertext<Scheme::BFV>& output,
-                     Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
+                     const Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
                      const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            galois_key.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
-                throw std::invalid_argument("Ciphertext can not be rotated!");
+                throw StateError("Ciphertext can not be rotated! "
+                                 "Relinearize it first.");
             }
 
             if (input1.memory_size() < (2 * context_->n * context_->Q_size))
             {
-                throw std::invalid_argument("Invalid Ciphertexts size!");
+                throw ParameterError(error_message(
+                    "Invalid Ciphertexts size! Expected at least ",
+                    (2 * context_->n * context_->Q_size), " coefficients, got ",
+                    input1.memory_size(), "."));
             }
 
             input_storage_manager(
@@ -782,43 +788,18 @@ namespace heongpu
                         output,
                         [&](Ciphertext<Scheme::BFV>& output_)
                         {
-                            switch (static_cast<int>(galois_key.key_type))
+                            if (input1_.in_ntt_domain_ != false)
                             {
-                                case 1: // KEYSWITCHING_METHOD_I
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    apply_galois_method_I(
-                                        input1_, output_, galois_key,
-                                        galois_elt, options.stream_);
-
-                                    break;
-                                case 2: // KEYSWITCHING_METHOD_II
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    apply_galois_method_II(
-                                        input1_, output_, galois_key,
-                                        galois_elt, options.stream_);
-
-                                    break;
-                                default:
-                                    throw std::invalid_argument(
-                                        "Invalid Key Switching Type");
-                                    break;
+                                throw std::invalid_argument(
+                                    "Ciphertext should be in intt "
+                                    "domain");
                             }
 
+                            apply_galois_bfv(input1_, output_, galois_key,
+                                             galois_elt, options.stream_);
+
                             output_.scheme_ = context_->scheme_;
+                            output_.context_id_ = context_->context_id_;
                             output_.ring_size_ = context_->n;
                             output_.coeff_modulus_count_ = context_->Q_size;
                             output_.cipher_size_ = 2;
@@ -842,10 +823,13 @@ namespace heongpu
          * @param galois_elt The Galois element to apply.
          */
         __host__ void apply_galois_inplace(
-            Ciphertext<Scheme::BFV>& input1, Galoiskey<Scheme::BFV>& galois_key,
-            int galois_elt,
+            Ciphertext<Scheme::BFV>& input1,
+            const Galoiskey<Scheme::BFV>& galois_key, int galois_elt,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            galois_key.validate_context(context_);
+
             apply_galois(input1, input1, galois_key, galois_elt, options);
         }
 
@@ -859,19 +843,26 @@ namespace heongpu
          * @param switch_key Switch key used for the key switching operation.
          */
         __host__ void
-        keyswitch(Ciphertext<Scheme::BFV>& input1,
+        keyswitch(const Ciphertext<Scheme::BFV>& input1,
                   Ciphertext<Scheme::BFV>& output,
-                  Switchkey<Scheme::BFV>& switch_key,
+                  const Switchkey<Scheme::BFV>& switch_key,
                   const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            switch_key.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
-                throw std::invalid_argument("Ciphertext can not be rotated!");
+                throw StateError("Ciphertext can not be rotated! "
+                                 "Relinearize it first.");
             }
 
             if (input1.memory_size() < (2 * context_->n * context_->Q_size))
             {
-                throw std::invalid_argument("Invalid Ciphertexts size!");
+                throw ParameterError(error_message(
+                    "Invalid Ciphertexts size! Expected at least ",
+                    (2 * context_->n * context_->Q_size), " coefficients, got ",
+                    input1.memory_size(), "."));
             }
 
             input_storage_manager(
@@ -882,43 +873,18 @@ namespace heongpu
                         output,
                         [&](Ciphertext<Scheme::BFV>& output_)
                         {
-                            switch (static_cast<int>(switch_key.key_type))
+                            if (input1_.in_ntt_domain_ != false)
                             {
-                                case 1: // KEYSWITCHING_METHOD_I
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    switchkey_method_I(input1_, output_,
-                                                       switch_key,
-                                                       options.stream_);
-
-                                    break;
-                                case 2: // KEYSWITCHING_METHOD_II
-
-                                    if (input1_.in_ntt_domain_ != false)
-                                    {
-                                        throw std::invalid_argument(
-                                            "Ciphertext should be in intt "
-                                            "domain");
-                                    }
-
-                                    switchkey_method_II(input1_, output_,
-                                                        switch_key,
-                                                        options.stream_);
-
-                                    break;
-                                default:
-                                    throw std::invalid_argument(
-                                        "Invalid Key Switching Type");
-                                    break;
+                                throw std::invalid_argument(
+                                    "Ciphertext should be in intt "
+                                    "domain");
                             }
 
+                            switchkey_bfv(input1_, output_, switch_key,
+                                          options.stream_);
+
                             output_.scheme_ = context_->scheme_;
+                            output_.context_id_ = context_->context_id_;
                             output_.ring_size_ = context_->n;
                             output_.coeff_modulus_count_ = context_->Q_size;
                             output_.cipher_size_ = 2;
@@ -933,9 +899,12 @@ namespace heongpu
         }
 
         __host__ void multiply_power_of_X(
-            Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-            int index, const ExecutionOptions& options = ExecutionOptions())
+            const Ciphertext<Scheme::BFV>& input1,
+            Ciphertext<Scheme::BFV>& output, int index,
+            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             if (index != 0)
             {
                 if (input1.in_ntt_domain_ != false)
@@ -946,7 +915,10 @@ namespace heongpu
 
                 if (input1.memory_size() < (2 * context_->n * context_->Q_size))
                 {
-                    throw std::invalid_argument("Invalid Ciphertexts size!");
+                    throw ParameterError(error_message(
+                        "Invalid Ciphertexts size! Expected at least ",
+                        (2 * context_->n * context_->Q_size),
+                        " coefficients, got ", input1.memory_size(), "."));
                 }
 
                 input_storage_manager(
@@ -961,6 +933,7 @@ namespace heongpu
                                     input1_, output_, index, options.stream_);
 
                                 output.scheme_ = context_->scheme_;
+                                output.context_id_ = context_->context_id_;
                                 output.ring_size_ = context_->n;
                                 output.coeff_modulus_count_ = context_->Q_size;
                                 output.cipher_size_ = 2;
@@ -984,15 +957,20 @@ namespace heongpu
          * stored.
          */
         __host__ void
-        transform_to_ntt(Plaintext<Scheme::BFV>& input1,
+        transform_to_ntt(const Plaintext<Scheme::BFV>& input1,
                          Plaintext<Scheme::BFV>& output,
                          const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             if (!input1.in_ntt_domain_)
             {
                 if (input1.size() < context_->n)
                 {
-                    throw std::invalid_argument("Invalid Ciphertexts size!");
+                    throw ParameterError(error_message(
+                        "Invalid Ciphertexts size! Expected at least ",
+                        context_->n, " coefficients, got ", input1.size(),
+                        "."));
                 }
 
                 input_storage_manager(
@@ -1003,10 +981,11 @@ namespace heongpu
                             output,
                             [&](Plaintext<Scheme::BFV>& output_)
                             {
-                                transform_to_ntt_bfv_plain(input1, output,
+                                transform_to_ntt_bfv_plain(input1_, output_,
                                                            options.stream_);
 
                                 output.scheme_ = input1.scheme_;
+                                output.context_id_ = input1.context_id_;
                                 output.plain_size_ =
                                     (context_->n * context_->Q_size);
                                 output.in_ntt_domain_ = true;
@@ -1028,6 +1007,8 @@ namespace heongpu
             Plaintext<Scheme::BFV>& input1,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             transform_to_ntt(input1, input1, options);
         }
 
@@ -1040,10 +1021,12 @@ namespace heongpu
          * stored.
          */
         __host__ void
-        transform_to_ntt(Ciphertext<Scheme::BFV>& input1,
+        transform_to_ntt(const Ciphertext<Scheme::BFV>& input1,
                          Ciphertext<Scheme::BFV>& output,
                          const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -1054,7 +1037,10 @@ namespace heongpu
             {
                 if (input1.memory_size() < (2 * context_->n * context_->Q_size))
                 {
-                    throw std::invalid_argument("Invalid Ciphertexts size!");
+                    throw ParameterError(error_message(
+                        "Invalid Ciphertexts size! Expected at least ",
+                        (2 * context_->n * context_->Q_size),
+                        " coefficients, got ", input1.memory_size(), "."));
                 }
 
                 input_storage_manager(
@@ -1069,6 +1055,7 @@ namespace heongpu
                                                             options.stream_);
 
                                 output.scheme_ = context_->scheme_;
+                                output.context_id_ = context_->context_id_;
                                 output.ring_size_ = context_->n;
                                 output.coeff_modulus_count_ = context_->Q_size;
                                 output.cipher_size_ = 2;
@@ -1093,6 +1080,8 @@ namespace heongpu
             Ciphertext<Scheme::BFV>& input1,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             transform_to_ntt(input1, input1, options);
         }
 
@@ -1105,10 +1094,12 @@ namespace heongpu
          * stored.
          */
         __host__ void
-        transform_from_ntt(Ciphertext<Scheme::BFV>& input1,
+        transform_from_ntt(const Ciphertext<Scheme::BFV>& input1,
                            Ciphertext<Scheme::BFV>& output,
                            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             if (input1.relinearization_required_)
             {
                 throw std::invalid_argument(
@@ -1119,7 +1110,10 @@ namespace heongpu
             {
                 if (input1.memory_size() < (2 * context_->n * context_->Q_size))
                 {
-                    throw std::invalid_argument("Invalid Ciphertexts size!");
+                    throw ParameterError(error_message(
+                        "Invalid Ciphertexts size! Expected at least ",
+                        (2 * context_->n * context_->Q_size),
+                        " coefficients, got ", input1.memory_size(), "."));
                 }
 
                 input_storage_manager(
@@ -1134,6 +1128,7 @@ namespace heongpu
                                                               options.stream_);
 
                                 output.scheme_ = context_->scheme_;
+                                output.context_id_ = context_->context_id_;
                                 output.ring_size_ = context_->n;
                                 output.coeff_modulus_count_ = context_->Q_size;
                                 output.cipher_size_ = 2;
@@ -1158,6 +1153,8 @@ namespace heongpu
             Ciphertext<Scheme::BFV>& input1,
             const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             transform_from_ntt(input1, input1, options);
         }
 
@@ -1166,6 +1163,201 @@ namespace heongpu
         HEOperator(HEOperator&& source) = default;
         HEOperator& operator=(const HEOperator& assign) = default;
         HEOperator& operator=(HEOperator&& assign) = default;
+
+        /**
+         * @brief Returns a ciphertext whose slots all hold the sum of the slots
+         * of input1, over both rows. Uses log2(row size) rotations by the
+         * steps 1, 2, 4, ..., row size / 2 and one column rotation, so
+         * galois_key needs a key for each of these steps, as
+         * Galoiskey(context, log2(row size) - 1) has.
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        sum_slots(const Ciphertext<Scheme::BFV>& input1,
+                  const Galoiskey<Scheme::BFV>& galois_key,
+                  const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> result = input1;
+            for (int step = 1; step < (context_->n >> 1); step <<= 1)
+            {
+                Ciphertext<Scheme::BFV> rotated(context_, options);
+                rotate_rows(result, rotated, galois_key, step, options);
+                add_inplace(result, rotated, options);
+            }
+            Ciphertext<Scheme::BFV> swapped(context_, options);
+            rotate_columns(result, swapped, galois_key, options);
+            add_inplace(result, swapped, options);
+            return result;
+        }
+
+        /**
+         * @brief Returns a ciphertext whose slots all hold the inner product
+         * of the slots of input1 and input2. Multiplies, relinearizes and then
+         * calls sum_slots.
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        inner_product(const Ciphertext<Scheme::BFV>& input1,
+                      const Ciphertext<Scheme::BFV>& input2,
+                      const Relinkey<Scheme::BFV>& relin_key,
+                      const Galoiskey<Scheme::BFV>& galois_key,
+                      const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> product(context_, options);
+            multiply(input1, input2, product, options);
+            relinearize_inplace(product, relin_key, options);
+            return sum_slots(product, galois_key, options);
+        }
+
+        /**
+         * @brief Returns a ciphertext whose slots all hold the inner product
+         * of the slots of input1 and input2. Multiplies and then calls
+         * sum_slots.
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        inner_product(const Ciphertext<Scheme::BFV>& input1,
+                      const Plaintext<Scheme::BFV>& input2,
+                      const Galoiskey<Scheme::BFV>& galois_key,
+                      const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> product(context_, options);
+            multiply_plain(input1, input2, product, options);
+            return sum_slots(product, galois_key, options);
+        }
+
+        /**
+         * @brief Returns input1 rotated by each of shifts: the same results as
+         * rotate_rows(input1, output, galois_key, shift) for each shift. The
+         * rotations by shifts that galois_key has a key for share the
+         * decomposition of input1 that key switching starts with, which is
+         * computed once, so each of them after the first costs less than a
+         * rotate_rows. Other shifts are composed from the power of two keys,
+         * as rotate_rows does.
+         */
+        __host__ std::vector<Ciphertext<Scheme::BFV>> rotate_rows_hoisted(
+            const Ciphertext<Scheme::BFV>& input1,
+            const Galoiskey<Scheme::BFV>& galois_key,
+            const std::vector<int>& shifts,
+            const ExecutionOptions& options = ExecutionOptions());
+
+        // Value-returning versions of the functions above. They give the
+        // same results.
+
+        /**
+         * @brief Returns input1 + input2; see add(input1, input2, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        add(const Ciphertext<Scheme::BFV>& input1,
+            const Ciphertext<Scheme::BFV>& input2,
+            const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            add(input1, input2, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns input1 - input2; see sub(input1, input2, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        sub(const Ciphertext<Scheme::BFV>& input1,
+            const Ciphertext<Scheme::BFV>& input2,
+            const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            sub(input1, input2, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns input1 * input2; see multiply(input1, input2, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        multiply(const Ciphertext<Scheme::BFV>& input1,
+                 const Ciphertext<Scheme::BFV>& input2,
+                 const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            multiply(input1, input2, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns -input1; see negate(input1, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        negate(const Ciphertext<Scheme::BFV>& input1,
+               const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            negate(input1, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns the result of add_plain(input1, input2, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        add_plain(const Ciphertext<Scheme::BFV>& input1,
+                  const Plaintext<Scheme::BFV>& input2,
+                  const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            add_plain(input1, input2, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns the result of sub_plain(input1, input2, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        sub_plain(const Ciphertext<Scheme::BFV>& input1,
+                  const Plaintext<Scheme::BFV>& input2,
+                  const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            sub_plain(input1, input2, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns the result of multiply_plain(input1, input2, output).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        multiply_plain(const Ciphertext<Scheme::BFV>& input1,
+                       const Plaintext<Scheme::BFV>& input2,
+                       const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            multiply_plain(input1, input2, output, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns input1 rotated by shift; see rotate_rows(input1,
+         * output, galois_key, shift).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        rotate_rows(const Ciphertext<Scheme::BFV>& input1,
+                    const Galoiskey<Scheme::BFV>& galois_key, int shift,
+                    const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            rotate_rows(input1, output, galois_key, shift, options);
+            return output;
+        }
+
+        /**
+         * @brief Returns input1 with its rows swapped; see
+         * rotate_columns(input1, output, galois_key).
+         */
+        __host__ Ciphertext<Scheme::BFV>
+        rotate_columns(const Ciphertext<Scheme::BFV>& input1,
+                       const Galoiskey<Scheme::BFV>& galois_key,
+                       const ExecutionOptions& options = ExecutionOptions())
+        {
+            Ciphertext<Scheme::BFV> output(context_, options);
+            rotate_columns(input1, output, galois_key, options);
+            return output;
+        }
 
         // private:
       protected:
@@ -1199,63 +1391,80 @@ namespace heongpu
 
         ///////////////////////////////////////////////////
 
-        __host__ void
-        relinearize_seal_method_inplace(Ciphertext<Scheme::BFV>& input1,
-                                        Relinkey<Scheme::BFV>& relin_key,
-                                        const cudaStream_t stream);
-
-        __host__ void relinearize_external_product_method2_inplace(
-            Ciphertext<Scheme::BFV>& input1, Relinkey<Scheme::BFV>& relin_key,
-            const cudaStream_t stream);
+        __host__ void relinearize_external_product_inplace(
+            Ciphertext<Scheme::BFV>& input1,
+            const Relinkey<Scheme::BFV>& relin_key, const cudaStream_t stream);
 
         ///////////////////////////////////////////////////
 
-        __host__ void rotate_method_I(Ciphertext<Scheme::BFV>& input1,
-                                      Ciphertext<Scheme::BFV>& output,
-                                      Galoiskey<Scheme::BFV>& galois_key,
-                                      int shift, const cudaStream_t stream);
+        // The digits of c1 of a ciphertext in P * Q, NTT form: the part of a
 
-        __host__ void rotate_method_II(Ciphertext<Scheme::BFV>& input1,
+        // Galois automorphism that does not depend on the Galois element, which
+
+        // automorphisms of one ciphertext can share.
+
+        struct GaloisDecomposition
+
+        {
+            DeviceVector<Data64> digits;
+        };
+
+        __host__ GaloisDecomposition
+
+        decompose_for_galois(Ciphertext<Scheme::BFV>& input1,
+
+                             const cudaStream_t stream);
+
+        // Applies the automorphism of galois_elt to input1, given its
+
+        // decomposition.
+
+        __host__ void apply_galois_decomposed(
+
+            Ciphertext<Scheme::BFV>& input1, GaloisDecomposition& decomposition,
+
+            Ciphertext<Scheme::BFV>& output,
+            const Galoiskey<Scheme::BFV>& galois_key,
+
+            int galois_elt, const cudaStream_t stream);
+
+        // The ModUp of key switching: splits input, a polynomial in coefficient
+
+        // form, into the digits of the context and extends each digit to the
+
+        // primes of P * Q.
+
+        __host__ void decompose_to_Qtilde(Data64* input, Data64* output,
+
+                                          cudaStream_t stream);
+
+        __host__ void rotate_bfv(Ciphertext<Scheme::BFV>& input1,
+                                 Ciphertext<Scheme::BFV>& output,
+                                 const Galoiskey<Scheme::BFV>& galois_key,
+                                 int shift, const cudaStream_t stream);
+
+        ///////////////////////////////////////////////////
+
+        __host__ void apply_galois_bfv(Ciphertext<Scheme::BFV>& input1,
                                        Ciphertext<Scheme::BFV>& output,
-                                       Galoiskey<Scheme::BFV>& galois_key,
-                                       int shift, const cudaStream_t stream);
+                                       const Galoiskey<Scheme::BFV>& galois_key,
+                                       int galois_elt,
+                                       const cudaStream_t stream);
 
         ///////////////////////////////////////////////////
 
-        // TODO: Merge with rotation, provide code integrity
-        __host__ void apply_galois_method_I(Ciphertext<Scheme::BFV>& input1,
-                                            Ciphertext<Scheme::BFV>& output,
-                                            Galoiskey<Scheme::BFV>& galois_key,
-                                            int galois_elt,
-                                            const cudaStream_t stream);
-
-        __host__ void apply_galois_method_II(Ciphertext<Scheme::BFV>& input1,
-                                             Ciphertext<Scheme::BFV>& output,
-                                             Galoiskey<Scheme::BFV>& galois_key,
-                                             int galois_elt,
-                                             const cudaStream_t stream);
+        __host__ void
+        rotate_columns_bfv(Ciphertext<Scheme::BFV>& input1,
+                           Ciphertext<Scheme::BFV>& output,
+                           const Galoiskey<Scheme::BFV>& galois_key,
+                           const cudaStream_t stream);
 
         ///////////////////////////////////////////////////
 
-        __host__ void rotate_columns_method_I(
-            Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-            Galoiskey<Scheme::BFV>& galois_key, const cudaStream_t stream);
-
-        __host__ void rotate_columns_method_II(
-            Ciphertext<Scheme::BFV>& input1, Ciphertext<Scheme::BFV>& output,
-            Galoiskey<Scheme::BFV>& galois_key, const cudaStream_t stream);
-
-        ///////////////////////////////////////////////////
-
-        __host__ void switchkey_method_I(Ciphertext<Scheme::BFV>& input1,
-                                         Ciphertext<Scheme::BFV>& output,
-                                         Switchkey<Scheme::BFV>& switch_key,
-                                         const cudaStream_t stream);
-
-        __host__ void switchkey_method_II(Ciphertext<Scheme::BFV>& input1,
-                                          Ciphertext<Scheme::BFV>& output,
-                                          Switchkey<Scheme::BFV>& switch_key,
-                                          const cudaStream_t stream);
+        __host__ void switchkey_bfv(Ciphertext<Scheme::BFV>& input1,
+                                    Ciphertext<Scheme::BFV>& output,
+                                    const Switchkey<Scheme::BFV>& switch_key,
+                                    const cudaStream_t stream);
 
         ///////////////////////////////////////////////////
 
@@ -1294,7 +1503,7 @@ namespace heongpu
       protected:
         // Just for copy parameters, not memory!
         __host__ Ciphertext<Scheme::BFV>
-        operator_from_ciphertext(Ciphertext<Scheme::BFV>& input,
+        operator_from_ciphertext(const Ciphertext<Scheme::BFV>& input,
                                  cudaStream_t stream = cudaStreamDefault);
     };
 
@@ -1340,14 +1549,16 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void NOT(Ciphertext<Scheme::BFV>& input1,
+        __host__ void NOT(const Ciphertext<Scheme::BFV>& input1,
                           Ciphertext<Scheme::BFV>& output,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             input_storage_manager(
@@ -1373,10 +1584,12 @@ namespace heongpu
         NOT_inplace(Ciphertext<Scheme::BFV>& input1,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             input_storage_manager(
@@ -1395,17 +1608,21 @@ namespace heongpu
          * @param relin_key Relinearization key.
          * @param options Execution options.
          */
-        __host__ void AND(Ciphertext<Scheme::BFV>& input1,
-                          Ciphertext<Scheme::BFV>& input2,
+        __host__ void AND(const Ciphertext<Scheme::BFV>& input1,
+                          const Ciphertext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
-                          Relinkey<Scheme::BFV>& relin_key,
+                          const Relinkey<Scheme::BFV>& relin_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             input_storage_manager(
@@ -1442,10 +1659,14 @@ namespace heongpu
          */
         __host__ void
         AND_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Ciphertext<Scheme::BFV>& input2,
-                    Relinkey<Scheme::BFV>& relin_key,
+                    const Ciphertext<Scheme::BFV>& input2,
+                    const Relinkey<Scheme::BFV>& relin_key,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             AND(input1, input2, input1, relin_key, options);
         }
 
@@ -1457,15 +1678,18 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void AND(Ciphertext<Scheme::BFV>& input1,
-                          Plaintext<Scheme::BFV>& input2,
+        __host__ void AND(const Ciphertext<Scheme::BFV>& input1,
+                          const Plaintext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             input_storage_manager(
@@ -1498,9 +1722,12 @@ namespace heongpu
          */
         __host__ void
         AND_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Plaintext<Scheme::BFV>& input2,
+                    const Plaintext<Scheme::BFV>& input2,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             AND(input1, input2, input1, options);
         }
 
@@ -1513,17 +1740,21 @@ namespace heongpu
          * @param relin_key Relinearization key.
          * @param options Execution options.
          */
-        __host__ void OR(Ciphertext<Scheme::BFV>& input1,
-                         Ciphertext<Scheme::BFV>& input2,
+        __host__ void OR(const Ciphertext<Scheme::BFV>& input1,
+                         const Ciphertext<Scheme::BFV>& input2,
                          Ciphertext<Scheme::BFV>& output,
-                         Relinkey<Scheme::BFV>& relin_key,
+                         const Relinkey<Scheme::BFV>& relin_key,
                          const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -1571,10 +1802,14 @@ namespace heongpu
          */
         __host__ void
         OR_inplace(Ciphertext<Scheme::BFV>& input1,
-                   Ciphertext<Scheme::BFV>& input2,
-                   Relinkey<Scheme::BFV>& relin_key,
+                   const Ciphertext<Scheme::BFV>& input2,
+                   const Relinkey<Scheme::BFV>& relin_key,
                    const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             OR(input1, input2, input1, relin_key, options);
         }
 
@@ -1586,15 +1821,18 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void OR(Ciphertext<Scheme::BFV>& input1,
-                         Plaintext<Scheme::BFV>& input2,
+        __host__ void OR(const Ciphertext<Scheme::BFV>& input1,
+                         const Plaintext<Scheme::BFV>& input2,
                          Ciphertext<Scheme::BFV>& output,
                          const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -1639,9 +1877,12 @@ namespace heongpu
          */
         __host__ void
         OR_inplace(Ciphertext<Scheme::BFV>& input1,
-                   Plaintext<Scheme::BFV>& input2,
+                   const Plaintext<Scheme::BFV>& input2,
                    const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             OR(input1, input2, input1, options);
         }
 
@@ -1654,17 +1895,21 @@ namespace heongpu
          * @param relin_key Relinearization key.
          * @param options Execution options.
          */
-        __host__ void XOR(Ciphertext<Scheme::BFV>& input1,
-                          Ciphertext<Scheme::BFV>& input2,
+        __host__ void XOR(const Ciphertext<Scheme::BFV>& input1,
+                          const Ciphertext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
-                          Relinkey<Scheme::BFV>& relin_key,
+                          const Relinkey<Scheme::BFV>& relin_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -1714,10 +1959,14 @@ namespace heongpu
          */
         __host__ void
         XOR_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Ciphertext<Scheme::BFV>& input2,
-                    Relinkey<Scheme::BFV>& relin_key,
+                    const Ciphertext<Scheme::BFV>& input2,
+                    const Relinkey<Scheme::BFV>& relin_key,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             XOR(input1, input2, input1, relin_key, options);
         }
 
@@ -1729,15 +1978,18 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void XOR(Ciphertext<Scheme::BFV>& input1,
-                          Plaintext<Scheme::BFV>& input2,
+        __host__ void XOR(const Ciphertext<Scheme::BFV>& input1,
+                          const Plaintext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -1784,9 +2036,12 @@ namespace heongpu
          */
         __host__ void
         XOR_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Plaintext<Scheme::BFV>& input2,
+                    const Plaintext<Scheme::BFV>& input2,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             XOR(input1, input2, input1, options);
         }
 
@@ -1799,17 +2054,21 @@ namespace heongpu
          * @param relin_key Relinearization key.
          * @param options Execution options.
          */
-        __host__ void NAND(Ciphertext<Scheme::BFV>& input1,
-                           Ciphertext<Scheme::BFV>& input2,
+        __host__ void NAND(const Ciphertext<Scheme::BFV>& input1,
+                           const Ciphertext<Scheme::BFV>& input2,
                            Ciphertext<Scheme::BFV>& output,
-                           Relinkey<Scheme::BFV>& relin_key,
+                           const Relinkey<Scheme::BFV>& relin_key,
                            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             input_storage_manager(
@@ -1848,10 +2107,14 @@ namespace heongpu
          */
         __host__ void
         NAND_inplace(Ciphertext<Scheme::BFV>& input1,
-                     Ciphertext<Scheme::BFV>& input2,
-                     Relinkey<Scheme::BFV>& relin_key,
+                     const Ciphertext<Scheme::BFV>& input2,
+                     const Relinkey<Scheme::BFV>& relin_key,
                      const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             NAND(input1, input2, input1, relin_key, options);
         }
 
@@ -1863,15 +2126,18 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void NAND(Ciphertext<Scheme::BFV>& input1,
-                           Plaintext<Scheme::BFV>& input2,
+        __host__ void NAND(const Ciphertext<Scheme::BFV>& input1,
+                           const Plaintext<Scheme::BFV>& input2,
                            Ciphertext<Scheme::BFV>& output,
                            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             input_storage_manager(
@@ -1908,9 +2174,12 @@ namespace heongpu
          */
         __host__ void
         NAND_inplace(Ciphertext<Scheme::BFV>& input1,
-                     Plaintext<Scheme::BFV>& input2,
+                     const Plaintext<Scheme::BFV>& input2,
                      const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             NAND(input1, input2, input1, options);
         }
 
@@ -1923,17 +2192,21 @@ namespace heongpu
          * @param relin_key Relinearization key.
          * @param options Execution options.
          */
-        __host__ void NOR(Ciphertext<Scheme::BFV>& input1,
-                          Ciphertext<Scheme::BFV>& input2,
+        __host__ void NOR(const Ciphertext<Scheme::BFV>& input1,
+                          const Ciphertext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
-                          Relinkey<Scheme::BFV>& relin_key,
+                          const Relinkey<Scheme::BFV>& relin_key,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -1984,10 +2257,14 @@ namespace heongpu
          */
         __host__ void
         NOR_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Ciphertext<Scheme::BFV>& input2,
-                    Relinkey<Scheme::BFV>& relin_key,
+                    const Ciphertext<Scheme::BFV>& input2,
+                    const Relinkey<Scheme::BFV>& relin_key,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             NOR(input1, input2, input1, relin_key, options);
         }
 
@@ -1999,15 +2276,18 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void NOR(Ciphertext<Scheme::BFV>& input1,
-                          Plaintext<Scheme::BFV>& input2,
+        __host__ void NOR(const Ciphertext<Scheme::BFV>& input1,
+                          const Plaintext<Scheme::BFV>& input2,
                           Ciphertext<Scheme::BFV>& output,
                           const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -2055,9 +2335,12 @@ namespace heongpu
          */
         __host__ void
         NOR_inplace(Ciphertext<Scheme::BFV>& input1,
-                    Plaintext<Scheme::BFV>& input2,
+                    const Plaintext<Scheme::BFV>& input2,
                     const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             NOR(input1, input2, input1, options);
         }
 
@@ -2070,17 +2353,21 @@ namespace heongpu
          * @param relin_key Relinearization key.
          * @param options Execution options.
          */
-        __host__ void XNOR(Ciphertext<Scheme::BFV>& input1,
-                           Ciphertext<Scheme::BFV>& input2,
+        __host__ void XNOR(const Ciphertext<Scheme::BFV>& input1,
+                           const Ciphertext<Scheme::BFV>& input2,
                            Ciphertext<Scheme::BFV>& output,
-                           Relinkey<Scheme::BFV>& relin_key,
+                           const Relinkey<Scheme::BFV>& relin_key,
                            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -2133,10 +2420,14 @@ namespace heongpu
          */
         __host__ void
         XNOR_inplace(Ciphertext<Scheme::BFV>& input1,
-                     Ciphertext<Scheme::BFV>& input2,
-                     Relinkey<Scheme::BFV>& relin_key,
+                     const Ciphertext<Scheme::BFV>& input2,
+                     const Relinkey<Scheme::BFV>& relin_key,
                      const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+            relin_key.validate_context(context_);
+
             XNOR(input1, input2, input1, relin_key, options);
         }
 
@@ -2148,16 +2439,19 @@ namespace heongpu
          * @param output Output ciphertext.
          * @param options Execution options.
          */
-        __host__ void XNOR(Ciphertext<Scheme::BFV>& input1,
-                           Plaintext<Scheme::BFV>& input2,
+        __host__ void XNOR(const Ciphertext<Scheme::BFV>& input1,
+                           const Plaintext<Scheme::BFV>& input2,
                            Ciphertext<Scheme::BFV>& output,
                            const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             // TODO: Make it efficient
             ExecutionOptions options_inner =
                 ExecutionOptions()
                     .set_stream(options.stream_)
-                    .set_storage_type(storage_type::DEVICE)
+                    .set_storage_type(storage_type::device)
                     .set_initial_location(true);
 
             Ciphertext<Scheme::BFV> inner_input1 =
@@ -2208,14 +2502,17 @@ namespace heongpu
          */
         __host__ void
         XNOR_inplace(Ciphertext<Scheme::BFV>& input1,
-                     Plaintext<Scheme::BFV>& input2,
+                     const Plaintext<Scheme::BFV>& input2,
                      const ExecutionOptions& options = ExecutionOptions())
         {
+            input1.validate_context(context_);
+            input2.validate_context(context_);
+
             XNOR(input1, input2, input1, options);
         }
 
         __host__ void
-        one_minus_cipher(Ciphertext<Scheme::BFV>& input1,
+        one_minus_cipher(const Ciphertext<Scheme::BFV>& input1,
                          Ciphertext<Scheme::BFV>& output,
                          const ExecutionOptions& options = ExecutionOptions());
 

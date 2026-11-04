@@ -1,9 +1,11 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
 #include <heongpu/host/bfv/context.cuh>
+#include <heongpu/util/runtime.cuh>
 
 namespace heongpu
 {
@@ -13,7 +15,6 @@ namespace heongpu
         {
             scheme_ = scheme_type::bfv;
             sec_level_ = sec_level;
-            keyswitching_type_ = keyswitching_type::NONE;
         }
         else
         {
@@ -64,16 +65,8 @@ namespace heongpu
                     "log_P_bases_bit_sizes cannot be empty!");
             }
 
-            keyswitching_type_ =
-                (log_P_bases_bit_sizes.size() == 1)
-                    ? keyswitching_type::KEYSWITCHING_METHOD_I
-                    : keyswitching_type::KEYSWITCHING_METHOD_II;
-
-            if (!coefficient_validator(log_Q_bases_bit_sizes,
-                                       log_P_bases_bit_sizes))
-            {
-                throw std::logic_error("P should be bigger than Q pairs!");
-            }
+            validate_key_switching_digits(log_Q_bases_bit_sizes,
+                                          log_P_bases_bit_sizes);
 
             // Q' = Q x P
             Qprime_mod_bit_sizes_ = log_Q_bases_bit_sizes;
@@ -106,7 +99,9 @@ namespace heongpu
                     max_coeff_bit_count = heongpu_256bit_std_parms(n);
                     break;
                 default:
-                    throw std::runtime_error("Invalid security level");
+                    throw std::runtime_error(error_message(
+                        "Invalid security level ", static_cast<int>(sec_level_),
+                        "! Expected sec128, sec192 or sec256."));
                     break;
             }
 
@@ -173,17 +168,8 @@ namespace heongpu
                     "log_P_bases_bit_sizes cannot be empty!");
             }
 
-            keyswitching_type_ =
-                (log_P_bases_bit_sizes.size() == 1)
-                    ? keyswitching_type::KEYSWITCHING_METHOD_I
-                    : keyswitching_type::KEYSWITCHING_METHOD_II;
-
-            if (!coefficient_validator(log_Q_bases_bit_sizes,
-                                       log_P_bases_bit_sizes))
-            {
-                throw std::logic_error(
-                    "Invalid parameters, P should be bigger than Q pairs!");
-            }
+            validate_key_switching_digits(log_Q_bases_bit_sizes,
+                                          log_P_bases_bit_sizes);
 
             // Q' = Q x P
             Qprime_mod_bit_sizes_ = log_Q_bases_bit_sizes;
@@ -216,7 +202,9 @@ namespace heongpu
                     max_coeff_bit_count = heongpu_256bit_std_parms(n);
                     break;
                 default:
-                    throw std::runtime_error("Invalid security level");
+                    throw std::runtime_error(error_message(
+                        "Invalid security level ", static_cast<int>(sec_level_),
+                        "! Expected sec128, sec192 or sec256."));
                     break;
             }
 
@@ -275,11 +263,6 @@ namespace heongpu
                 throw std::logic_error(
                     "P_modulus_size cannot be lower than 1!");
             }
-
-            keyswitching_type_ =
-                (P_modulus_size == 1)
-                    ? keyswitching_type::KEYSWITCHING_METHOD_I
-                    : keyswitching_type::KEYSWITCHING_METHOD_II;
 
             total_coeff_bit_count = 0;
             switch (sec_level_)
@@ -345,7 +328,9 @@ namespace heongpu
                 }
                 break;
                 default:
-                    throw std::runtime_error("Invalid security level");
+                    throw std::runtime_error(error_message(
+                        "Invalid security level ", static_cast<int>(sec_level_),
+                        "! Expected sec128, sec192 or sec256."));
                     break;
             }
 
@@ -399,28 +384,8 @@ namespace heongpu
         if ((!context_generated_) && (poly_modulus_degree_specified_) &&
             (plain_modulus_specified_) && (coeff_modulus_specified_))
         {
-            // Memory pool initialization
-            MemoryPool::instance().initialize(pool_config);
-            MemoryPool::instance().use_memory_pool(pool_config.use_memory_pool);
-            cudaDeviceSynchronize();
-
-            // DRNG initialization
-            std::vector<unsigned char> generated_entropy(16); // for 128 bit
-            if (1 !=
-                RAND_bytes(generated_entropy.data(), generated_entropy.size()))
-                throw std::runtime_error("RAND_bytes failed");
-            std::vector<unsigned char> generated_nonce(8); // for 128 bit
-            if (1 !=
-                RAND_bytes(generated_entropy.data(), generated_entropy.size()))
-                throw std::runtime_error("RAND_bytes failed");
-            std::vector<unsigned char> personalization_string = {};
-            RandomNumberGenerator::instance().initialize(
-                generated_entropy, generated_nonce, personalization_string,
-                rngongpu::SecurityLevel::AES128, false);
-            cudaDeviceSynchronize();
-
-            // For kernel stack size
-            cudaDeviceSetLimit(cudaLimitStackSize, 2048);
+            // Memory pool, random number generator and kernel stack size.
+            heongpu::initialize(pool_config);
 
             modulus_ = std::make_shared<DeviceVector<Modulus64>>(prime_vector_);
 
@@ -515,9 +480,18 @@ namespace heongpu
                 generate_coeff_div_plain_modulus(prime_vector_, plain_mod,
                                                  Q_size);
 
-            bsk_modulus = prime_vector_.size();
-            if (calculate_bit_count(plain_mod.value) + total_coeff_bit_count +
-                    32 >=
+            // The base Bsk of the multiplication holds the tensor product of
+            // two ciphertexts, which depends on Q and t, not on P. The bound
+            // counts P as one prime of MAX_MOD_BIT_COUNT bits, so that no Q
+            // gets fewer Bsk primes than with one P prime before.
+            int Q_bit_count = 0;
+            for (int i = 0; i < Q_size; i++)
+            {
+                Q_bit_count += calculate_bit_count(prime_vector_[i].value);
+            }
+            bsk_modulus = Q_size + 1;
+            if (calculate_bit_count(plain_mod.value) + Q_bit_count +
+                    MAX_MOD_BIT_COUNT + 32 >=
                 MAX_MOD_BIT_COUNT * Q_size + MAX_MOD_BIT_COUNT)
             {
                 bsk_modulus++;
@@ -706,56 +680,41 @@ namespace heongpu
 
             //////////////////////////
 
-            switch (static_cast<int>(keyswitching_type_))
-            {
-                case 1: // KEYSWITCHING_METHOD_I
-                    // Deafult
-                    break;
-                case 2: // KEYSWITCHING_METHOD_II
-                {
-                    KeySwitchParameterGenerator pool(n, base_q, P_size, scheme_,
-                                                     keyswitching_type_);
+            KeySwitchParameterGenerator pool(n, base_q, P_size, scheme_);
 
-                    m = pool.m;
-                    l = pool.first_Q_;
-                    l_tilda = pool.first_Qtilda_;
+            m = pool.m;
+            l = pool.first_Q_;
+            l_tilda = pool.first_Qtilda_;
 
-                    d = pool.d_;
+            d = pool.d_;
 
-                    std::vector<Data64> base_change_matrix_D_to_Q_tilda_inner =
-                        pool.base_change_matrix_D_to_Qtilda();
-                    base_change_matrix_D_to_Q_tilda_ =
-                        std::make_shared<DeviceVector<Data64>>(
-                            base_change_matrix_D_to_Q_tilda_inner);
+            std::vector<Data64> base_change_matrix_D_to_Q_tilda_inner =
+                pool.base_change_matrix_D_to_Qtilda();
+            base_change_matrix_D_to_Q_tilda_ =
+                std::make_shared<DeviceVector<Data64>>(
+                    base_change_matrix_D_to_Q_tilda_inner);
 
-                    std::vector<Data64> Mi_inv_D_to_Q_tilda_inner =
-                        pool.Mi_inv_D_to_Qtilda();
-                    Mi_inv_D_to_Q_tilda_ =
-                        std::make_shared<DeviceVector<Data64>>(
-                            Mi_inv_D_to_Q_tilda_inner);
+            std::vector<Data64> Mi_inv_D_to_Q_tilda_inner =
+                pool.Mi_inv_D_to_Qtilda();
+            Mi_inv_D_to_Q_tilda_ = std::make_shared<DeviceVector<Data64>>(
+                Mi_inv_D_to_Q_tilda_inner);
 
-                    std::vector<Data64> prod_D_to_Q_tilda_inner =
-                        pool.prod_D_to_Qtilda();
-                    prod_D_to_Q_tilda_ = std::make_shared<DeviceVector<Data64>>(
-                        prod_D_to_Q_tilda_inner);
+            std::vector<Data64> prod_D_to_Q_tilda_inner =
+                pool.prod_D_to_Qtilda();
+            prod_D_to_Q_tilda_ =
+                std::make_shared<DeviceVector<Data64>>(prod_D_to_Q_tilda_inner);
 
-                    std::vector<int> I_j_inner = pool.I_j();
-                    I_j_ = std::make_shared<DeviceVector<int>>(I_j_inner);
+            std::vector<int> I_j_inner = pool.I_j();
+            I_j_ = std::make_shared<DeviceVector<int>>(I_j_inner);
 
-                    std::vector<int> I_location_inner = pool.I_location();
-                    I_location_ =
-                        std::make_shared<DeviceVector<int>>(I_location_inner);
+            std::vector<int> I_location_inner = pool.I_location();
+            I_location_ = std::make_shared<DeviceVector<int>>(I_location_inner);
 
-                    std::vector<int> Sk_pair_inner = pool.sk_pair();
-                    Sk_pair_ =
-                        std::make_shared<DeviceVector<int>>(Sk_pair_inner);
-                }
-                break;
-                default:
-                    throw std::invalid_argument("Invalid Key Switching Type");
-                    break;
-            }
+            std::vector<int> Sk_pair_inner = pool.sk_pair();
+            Sk_pair_ = std::make_shared<DeviceVector<int>>(Sk_pair_inner);
 
+            context_id_ = context_identity(static_cast<int>(scheme_), n,
+                                           prime_vector_, plain_modulus_.value);
             context_generated_ = true;
         }
         else
@@ -764,53 +723,57 @@ namespace heongpu
         }
     }
 
-    void HEContextImpl<Scheme::BFV>::print_parameters()
+    void HEContextImpl<Scheme::BFV>::print_parameters(std::ostream& os) const
     {
         if (context_generated_)
         {
             std::string scheme_string = "BFV";
-            std::cout << "==== HEonGPU a GPU Based Homomorphic Encryption "
-                         "Library ====\n"
-                      << std::endl;
-            std::cout << "Encryption parameters:" << std::endl;
-            std::cout << "-->   scheme: " << scheme_string << std::endl;
-            std::cout << "-->   poly_modulus_degree: " << n << std::endl;
-            std::cout << "-->   Q_tilta size: Q( ";
+            os << "==== HEonGPU a GPU Based Homomorphic Encryption "
+                  "Library ====\n"
+               << std::endl;
+            os << "Encryption parameters:" << std::endl;
+            os << "-->   scheme: " << scheme_string << std::endl;
+            os << "-->   poly_modulus_degree: " << n << std::endl;
+            os << "-->   Q_tilda size: Q( ";
 
             for (std::size_t i = 0; i < Q_mod_bit_sizes_.size() - 1; i++)
             {
-                std::cout << Q_mod_bit_sizes_[i] << " + ";
+                os << Q_mod_bit_sizes_[i] << " + ";
             }
-            std::cout << Q_mod_bit_sizes_.back();
-            std::cout << " ) + P( ";
+            os << Q_mod_bit_sizes_.back();
+            os << " ) + P( ";
             for (std::size_t i = 0; i < P_mod_bit_sizes_.size() - 1; i++)
             {
-                std::cout << P_mod_bit_sizes_[i] << " + ";
+                os << P_mod_bit_sizes_[i] << " + ";
             }
-            std::cout << P_mod_bit_sizes_.back();
-            std::cout << " ) bits" << std::endl;
+            os << P_mod_bit_sizes_.back();
+            os << " ) bits" << std::endl;
 
-            std::cout << "-->   plain_modulus: " << plain_modulus_.value
-                      << std::endl;
+            os << "-->   plain_modulus: " << plain_modulus_.value << std::endl;
 
-            std::cout << std::endl;
+            os << std::endl;
         }
         else
         {
-            std::cout << "Parameters is not generated yet!" << std::endl;
+            os << "Parameters is not generated yet!" << std::endl;
         }
     }
 
-    void HEContextImpl<Scheme::BFV>::save(std::ostream& os) const
+    void HEContextImpl<Scheme::BFV>::save(std::ostream& os,
+                                          serialization_format format) const
     {
         if ((poly_modulus_degree_specified_) && (coeff_modulus_specified_) &&
             (plain_modulus_specified_))
         {
+            detail::write_serialization_header(
+                os, format, detail::serialized_object::context, scheme_,
+                context_id_);
+
             os.write((char*) &scheme_, sizeof(scheme_));
 
             os.write((char*) &sec_level_, sizeof(sec_level_));
 
-            os.write((char*) &keyswitching_type_, sizeof(keyswitching_type_));
+            detail::write_keyswitching_byte(os);
 
             os.write((char*) &n, sizeof(n));
 
@@ -867,11 +830,17 @@ namespace heongpu
     {
         if ((!context_generated_))
         {
+            const std::uint64_t loaded_context_id =
+                detail::read_serialization_header(
+                    is, detail::serialized_object::context, scheme_type::bfv);
+            detail::validate_loaded_context_identity(
+                context_id_, loaded_context_id, "HEContext");
+
             is.read((char*) &scheme_, sizeof(scheme_));
 
             is.read((char*) &sec_level_, sizeof(sec_level_));
 
-            is.read((char*) &keyswitching_type_, sizeof(keyswitching_type_));
+            detail::read_keyswitching_byte(is, "HEContext");
 
             is.read((char*) &n, sizeof(n));
 
@@ -928,6 +897,14 @@ namespace heongpu
             context_generated_ = false;
 
             this->generate();
+
+            if (loaded_context_id != 0 && loaded_context_id != context_id_)
+            {
+                throw SerializationError(
+                    "Corrupted HEContext binary! The parameters "
+                    "do not match the context identity stored "
+                    "with them.");
+            }
         }
         else
         {
@@ -1347,6 +1324,46 @@ namespace heongpu
         Data64 inv_gamma = OPERATOR64::modinv(mod_, plain_mod);
 
         return inv_gamma;
+    }
+
+    std::string HEContextImpl<Scheme::BFV>::to_string() const
+    {
+        if (!context_generated_)
+        {
+            return "HEContext<BFV>(not generated)";
+        }
+        std::ostringstream stream;
+        auto bits = [&](const std::vector<int>& sizes)
+        {
+            for (std::size_t i = 0; i < sizes.size(); i++)
+            {
+                stream << (i == 0 ? "" : "+") << sizes[i];
+            }
+        };
+        stream << "HEContext<BFV>(N=" << n << ", Q=";
+        bits(Q_mod_bit_sizes_);
+        stream << " bits, P=";
+        bits(P_mod_bit_sizes_);
+        stream << " bits, t=" << plain_modulus_.value
+               << ", security=" << detail::name(sec_level_) << ", id=0x"
+               << std::hex << context_id_ << ")";
+        return stream.str();
+    }
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContextImpl<Scheme::BFV>& object)
+    {
+        return os << object.to_string();
+    }
+
+    std::ostream& operator<<(std::ostream& os,
+                             const HEContext<Scheme::BFV>& context)
+    {
+        if (!context)
+        {
+            return os << "HEContext<BFV>(null)";
+        }
+        return os << *context;
     }
 
     template class HEContextImpl<Scheme::BFV>;

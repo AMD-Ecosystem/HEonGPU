@@ -23,12 +23,20 @@ if("@USE_HIP@")
     find_dependency(hip REQUIRED)
     find_dependency(hiprand REQUIRED)
     find_dependency(rocthrust REQUIRED)
+else()
+    find_dependency(CUDAToolkit REQUIRED)
 endif()
 
 find_dependency(GPUNTT REQUIRED)
 find_dependency(GPUFFT REQUIRED)
-find_dependency(rmm REQUIRED)
-find_dependency(OpenSSL REQUIRED)
+if("@USE_HIP@")
+    # hipMM, which provides the rmm package on AMD GPUs, has its own version
+    # numbers.
+    find_dependency(rmm REQUIRED)
+else()
+    find_dependency(rmm 26.08 REQUIRED)
+endif()
+find_dependency(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto SSL)
 find_dependency(RNGonGPU REQUIRED)
 find_dependency(ZLIB REQUIRED)
 
@@ -42,6 +50,19 @@ if(NOT TARGET GMP::GMP)
     set_target_properties(GMP::GMP PROPERTIES
         IMPORTED_LOCATION ${GMP_LIBRARY}
         INTERFACE_INCLUDE_DIRECTORIES ${GMP_INCLUDE_DIR}
+    )
+endif()
+
+# NTL is linked privately, but a static HEonGPU still needs it at link time.
+if(NOT TARGET NTL::NTL)
+    find_library(NTL_LIBRARY NAMES ntl)
+    if(NOT NTL_LIBRARY)
+        message(FATAL_ERROR "NTL not found. Please install the NTL development package.")
+    endif()
+    add_library(NTL::NTL UNKNOWN IMPORTED)
+    set_target_properties(NTL::NTL PROPERTIES
+        IMPORTED_LOCATION ${NTL_LIBRARY}
+        INTERFACE_LINK_LIBRARIES GMP::GMP
     )
 endif()
 

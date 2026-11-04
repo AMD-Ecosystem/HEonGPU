@@ -1,4 +1,5 @@
 // Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
@@ -16,13 +17,13 @@ constexpr auto Scheme = heongpu::Scheme::CKKS;
 int main(int argc, char* argv[])
 {
     // Create CKKS context for coefficient/slot transform demonstration.
-    heongpu::HEContext<Scheme> context =
-        heongpu::GenHEContext<Scheme>(heongpu::sec_level_type::none);
-
+    heongpu::HEParams<Scheme> params;
+    params.security_level = heongpu::sec_level_type::none;
     const std::size_t poly_modulus_degree = 4096;
-    context->set_poly_modulus_degree(poly_modulus_degree);
-    context->set_coeff_modulus_bit_sizes(
-        {50, 40, 40, 40, 40, 40, 40, 40, 40}, {50});
+    params.poly_modulus_degree = poly_modulus_degree;
+    params.coeff_modulus_bit_sizes = {50, 40, 40, 40, 40, 40, 40, 40, 40};
+    params.special_modulus_bit_sizes = {50, 50};
+    heongpu::HEContext<Scheme> context = params.make_context();
     context->generate();
 
     const double scale = std::pow(2.0, 40);
@@ -43,12 +44,12 @@ int main(int argc, char* argv[])
     // Build transform context and Vandermonde-related precomputations.
     // ctos_start_level and stoc_start_level define where transforms begin.
     const int ctos_start_level = 0;
-    const int stoc_start_level = 4;
+    const int stoc_start_level = 3;
     heongpu::CKKSEncodingTransformConfig transform_config(
-        3, 3, ctos_start_level, stoc_start_level, false);
+        3, 3, ctos_start_level, stoc_start_level);
     heongpu::CKKSEncodingTransformContext transform_context;
-    operators.generate_encoding_transform_context(
-        transform_context, scale, transform_config);
+    operators.generate_encoding_transform_context(transform_context,
+                                                  transform_config);
 
     std::vector<int> key_index = transform_context.key_indexs_;
     heongpu::Galoiskey<Scheme> galois_key(context, key_index);
@@ -66,8 +67,8 @@ int main(int argc, char* argv[])
     coeff_message[7] = -0.875;
 
     heongpu::Plaintext<Scheme> coeff_plain(context);
-    encoder.encode(coeff_plain, coeff_message, scale, heongpu::ExecutionOptions(),
-                   heongpu::encoding::COEFFICIENT);
+    encoder.encode(coeff_plain, coeff_message, scale,
+                   heongpu::ExecutionOptions(), heongpu::encoding::coefficient);
 
     heongpu::Ciphertext<Scheme> coeff_cipher(context);
     encryptor.encrypt(coeff_cipher, coeff_plain);
@@ -76,17 +77,16 @@ int main(int argc, char* argv[])
     std::vector<heongpu::Ciphertext<Scheme>> slot_pair =
         operators.coeff_to_slot(coeff_cipher, galois_key, transform_context);
 
-    if ((slot_pair[0].encoding_type() != heongpu::encoding::SLOT) ||
-        (slot_pair[1].encoding_type() != heongpu::encoding::SLOT))
+    if ((slot_pair[0].encoding_type() != heongpu::encoding::slot) ||
+        (slot_pair[1].encoding_type() != heongpu::encoding::slot))
     {
         std::cerr << "coeff_to_slot output is not slot-encoded." << std::endl;
         return EXIT_FAILURE;
     }
 
     // Convert back to coefficient encoding (roundtrip).
-    heongpu::Ciphertext<Scheme> coeff_roundtrip =
-        operators.slot_to_coeff(slot_pair[0], slot_pair[1], galois_key,
-                                transform_context);
+    heongpu::Ciphertext<Scheme> coeff_roundtrip = operators.slot_to_coeff(
+        slot_pair[0], slot_pair[1], galois_key, transform_context);
 
     heongpu::Plaintext<Scheme> ref_plain(context);
     decryptor.decrypt(ref_plain, coeff_cipher);
@@ -102,8 +102,8 @@ int main(int argc, char* argv[])
     double max_abs_error = 0.0;
     for (std::size_t i = 0; i < ref_coeff.size(); ++i)
     {
-        max_abs_error = std::max(
-            max_abs_error, std::abs(ref_coeff[i] - roundtrip_coeff[i]));
+        max_abs_error = std::max(max_abs_error,
+                                 std::abs(ref_coeff[i] - roundtrip_coeff[i]));
     }
 
     std::cout << "Input ciphertext encoding      : "
@@ -117,7 +117,7 @@ int main(int argc, char* argv[])
     std::cout << "Max abs error (roundtrip)      : " << max_abs_error
               << std::endl;
 
-    if (coeff_roundtrip.encoding_type() != heongpu::encoding::COEFFICIENT)
+    if (coeff_roundtrip.encoding_type() != heongpu::encoding::coefficient)
     {
         std::cerr << "slot_to_coeff output is not coefficient-encoded."
                   << std::endl;

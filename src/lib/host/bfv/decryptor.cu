@@ -1,36 +1,42 @@
-﻿// Copyright 2024-2026 Alişah Özcan
+// Copyright 2024-2026 Alişah Özcan
+// Copyright 2026 enCRYPTON-Labs
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Developer: Alişah Özcan
 
 #include <heongpu/host/bfv/decryptor.cuh>
+#include <algorithm>
 
 namespace heongpu
 {
-    __host__
-    HEDecryptor<Scheme::BFV>::HEDecryptor(HEContext<Scheme::BFV> context,
-                                          Secretkey<Scheme::BFV>& secret_key)
+    __host__ HEDecryptor<Scheme::BFV>::HEDecryptor(
+        HEContext<Scheme::BFV> context,
+        const Secretkey<Scheme::BFV>& secret_key)
     {
         if (!context || !context->context_generated_)
         {
-            throw std::invalid_argument("HEContext is not generated!");
+            throw StateError(
+                "HEContext is not generated! Create the "
+                "context with GenHEContext and call generate() before "
+                "using it.");
         }
 
         context_ = std::move(context);
+        secret_key.validate_context(context_);
+        if (!secret_key.secret_key_generated_)
+            throw StateError("Secretkey is not generated! Call "
+                             "HEKeyGenerator::generate_secret_key first.");
 
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        seed_ = gen();
-        offset_ = gen();
-
-        if (secret_key.storage_type_ == storage_type::DEVICE)
+        if (secret_key.storage_type_ == storage_type::device)
         {
             secret_key_ = secret_key.device_locations_;
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(secret_key_.stream()));
         }
         else
         {
-            secret_key.store_in_device();
-            secret_key_ = secret_key.device_locations_;
+            // The key itself stays in host memory.
+            secret_key_ = DeviceVector<Data64>(secret_key.host_locations_);
+            HEONGPU_CUDA_CHECK(cudaStreamSynchronize(secret_key_.stream()));
         }
     }
 
@@ -168,21 +174,22 @@ namespace heongpu
     }
 
     __host__ int HEDecryptor<Scheme::BFV>::noise_budget_calculation(
-        Ciphertext<Scheme::BFV>& ciphertext, const ExecutionOptions& options)
+        const Ciphertext<Scheme::BFV>& ciphertext,
+        const ExecutionOptions& options)
     {
         const auto* ctx = context_.get();
         const int n = ctx->n;
         const int n_power = ctx->n_power;
         const int Q_size = ctx->Q_size;
 
-        HostVector<Data64> max_norm_memory(n * Q_size);
+        HostVector<Data64> max_norm_memory(Q_size);
 
         input_storage_manager(
             ciphertext,
             [&](Ciphertext<Scheme::BFV>& ciphertext_)
             {
-                Data64* ct0 = ciphertext.data();
-                Data64* ct1 = ciphertext.data() + (Q_size << n_power);
+                Data64* ct0 = ciphertext_.data();
+                Data64* ct1 = ciphertext_.data() + (Q_size << n_power);
 
                 gpuntt::ntt_rns_configuration<Data64> cfg_ntt = {
                     .n_power = n_power,
@@ -239,16 +246,28 @@ namespace heongpu
                     n_power); // TODO: merge with above kernel if possible
                 HEONGPU_CUDA_CHECK(cudaGetLastError());
 
-                cudaMemcpyAsync(max_norm_memory.data(), temp_memory.data(),
-                                Q_size * sizeof(Data64), cudaMemcpyDeviceToHost,
-                                options.stream_);
-                HEONGPU_CUDA_CHECK(cudaGetLastError());
+                HEONGPU_CUDA_CHECK(
+                    cudaMemcpyAsync(max_norm_memory.data(), temp_memory.data(),
+                                    Q_size * sizeof(Data64),
+                                    cudaMemcpyDeviceToHost, options.stream_));
+                HEONGPU_CUDA_CHECK(cudaStreamSynchronize(options.stream_));
             },
             options, false);
 
-        return ctx->total_bit_count_ -
-               calculate_big_integer_bit_count(max_norm_memory.data(), Q_size) -
-               1;
+        bool zero_norm = true;
+        for (int i = 0; i < Q_size; i++)
+        {
+            zero_norm = zero_norm && (max_norm_memory[i] == 0);
+        }
+        if (zero_norm)
+        {
+            return ctx->total_bit_count_ - 1;
+        }
+
+        return std::max(0, ctx->total_bit_count_ -
+                               calculate_big_integer_bit_count(
+                                   max_norm_memory.data(), Q_size) -
+                               1);
     }
 
 } // namespace heongpu
