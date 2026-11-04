@@ -18,6 +18,54 @@
 
 #include <heongpu/util/memorypool.cuh>
 
+namespace
+{
+    // hipMM, which provides RMM on AMD GPUs, follows the RMM 25.x API: it
+    // allocates with allocate_async(bytes, alignment, stream) and sets the
+    // default resource with set_current_device_resource_ref.
+#if defined(__HIP_PLATFORM_AMD__)
+    template <typename Resource>
+    void* rmm_allocate(Resource& resource, cudaStream_t stream, size_t size)
+    {
+        return resource.allocate_async(size, rmm::CUDA_ALLOCATION_ALIGNMENT,
+                                       stream);
+    }
+
+    template <typename Resource>
+    void rmm_deallocate(Resource& resource, cudaStream_t stream, void* ptr,
+                        size_t size)
+    {
+        resource.deallocate_async(ptr, size, rmm::CUDA_ALLOCATION_ALIGNMENT,
+                                  stream);
+    }
+
+    template <typename Resource> auto set_rmm_default(Resource&& resource)
+    {
+        return rmm::mr::set_current_device_resource_ref(
+            std::forward<Resource>(resource));
+    }
+#else
+    template <typename Resource>
+    void* rmm_allocate(Resource& resource, cudaStream_t stream, size_t size)
+    {
+        return resource.allocate(stream, size, rmm::CUDA_ALLOCATION_ALIGNMENT);
+    }
+
+    template <typename Resource>
+    void rmm_deallocate(Resource& resource, cudaStream_t stream, void* ptr,
+                        size_t size)
+    {
+        resource.deallocate(stream, ptr, size, rmm::CUDA_ALLOCATION_ALIGNMENT);
+    }
+
+    template <typename Resource> auto set_rmm_default(Resource&& resource)
+    {
+        return rmm::mr::set_current_device_resource(
+            std::forward<Resource>(resource));
+    }
+#endif
+} // namespace
+
 namespace heongpu
 {
     std::shared_ptr<MemoryPool::HostResource> MemoryPool::host_base_ = nullptr;
@@ -36,7 +84,7 @@ namespace heongpu
     bool MemoryPool::use_pool_ = true;
     std::unordered_set<void*> MemoryPool::pooled_device_allocations_;
     std::unordered_set<void*> MemoryPool::pooled_host_allocations_;
-    std::optional<cuda::mr::any_resource<cuda::mr::device_accessible>>
+    std::optional<MemoryPool::RmmDefaultResource>
         MemoryPool::previous_rmm_default_;
     std::mutex MemoryPool::mutex_;
 
@@ -294,7 +342,7 @@ namespace heongpu
         if (previous_rmm_default_)
         {
             // Keep the RMM default on the resource HEonGPU now uses.
-            rmm::mr::set_current_device_resource(resource);
+            set_rmm_default(resource);
         }
     }
 
@@ -304,7 +352,7 @@ namespace heongpu
         if (enable)
         {
             auto previous =
-                rmm::mr::set_current_device_resource(device_resource());
+                set_rmm_default(device_resource());
             // Keep the default from before HEonGPU first replaced it.
             if (!previous_rmm_default_)
             {
@@ -313,7 +361,7 @@ namespace heongpu
         }
         else if (previous_rmm_default_)
         {
-            rmm::mr::set_current_device_resource(
+            set_rmm_default(
                 std::move(*previous_rmm_default_));
             previous_rmm_default_.reset();
         }
@@ -344,7 +392,7 @@ namespace heongpu
         }
         if (previous_rmm_default_)
         {
-            rmm::mr::set_current_device_resource(
+            set_rmm_default(
                 std::move(*previous_rmm_default_));
             previous_rmm_default_.reset();
         }
@@ -375,14 +423,12 @@ namespace heongpu
         std::lock_guard<std::mutex> guard(mutex_);
         if (use_pool_ && device_stats_adaptor_)
         {
-            void* ptr = device_stats_adaptor_->allocate(
-                stream, size, rmm::CUDA_ALLOCATION_ALIGNMENT);
+            void* ptr = rmm_allocate(*device_stats_adaptor_, stream, size);
             pooled_device_allocations_.insert(ptr);
             return ptr;
         }
         ensure_base_resources();
-        return device_base_->allocate(stream, size,
-                                      rmm::CUDA_ALLOCATION_ALIGNMENT);
+        return rmm_allocate(*device_base_, stream, size);
     }
 
     void MemoryPool::deallocate(void* ptr, size_t size, cudaStream_t stream)
@@ -390,13 +436,11 @@ namespace heongpu
         std::lock_guard<std::mutex> guard(mutex_);
         if (pooled_device_allocations_.erase(ptr) != 0)
         {
-            device_stats_adaptor_->deallocate(stream, ptr, size,
-                                              rmm::CUDA_ALLOCATION_ALIGNMENT);
+            rmm_deallocate(*device_stats_adaptor_, stream, ptr, size);
             return;
         }
         ensure_base_resources();
-        device_base_->deallocate(stream, ptr, size,
-                                 rmm::CUDA_ALLOCATION_ALIGNMENT);
+        rmm_deallocate(*device_base_, stream, ptr, size);
     }
 
     rmm::device_async_resource_ref MemoryPool::get_device_resource() const
@@ -416,15 +460,12 @@ namespace heongpu
         std::lock_guard<std::mutex> guard(mutex_);
         if (use_pool_ && host_stats_adaptor_)
         {
-            void* ptr = host_stats_adaptor_->allocate(
-                cuda::stream_ref{cudaStream_t{nullptr}}, size,
-                rmm::CUDA_ALLOCATION_ALIGNMENT);
+            void* ptr = rmm_allocate(*host_stats_adaptor_, nullptr, size);
             pooled_host_allocations_.insert(ptr);
             return ptr;
         }
         ensure_base_resources();
-        return host_base_->allocate(cuda::stream_ref{cudaStream_t{nullptr}},
-                                    size, rmm::CUDA_ALLOCATION_ALIGNMENT);
+        return rmm_allocate(*host_base_, nullptr, size);
     }
 
     void MemoryPool::host_deallocate(void* ptr, size_t size)
@@ -432,14 +473,11 @@ namespace heongpu
         std::lock_guard<std::mutex> guard(mutex_);
         if (pooled_host_allocations_.erase(ptr) != 0)
         {
-            host_stats_adaptor_->deallocate(
-                cuda::stream_ref{cudaStream_t{nullptr}}, ptr, size,
-                rmm::CUDA_ALLOCATION_ALIGNMENT);
+            rmm_deallocate(*host_stats_adaptor_, nullptr, ptr, size);
             return;
         }
         ensure_base_resources();
-        host_base_->deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, ptr,
-                               size, rmm::CUDA_ALLOCATION_ALIGNMENT);
+        rmm_deallocate(*host_base_, nullptr, ptr, size);
     }
 
     void MemoryPool::print_memory_pool_status(std::ostream& os) const
@@ -536,7 +574,7 @@ namespace heongpu
             // refer to; a default set by the application stays as it is.
             if (previous_rmm_default_)
             {
-                rmm::mr::set_current_device_resource(
+                set_rmm_default(
                     std::move(*previous_rmm_default_));
                 previous_rmm_default_.reset();
             }
