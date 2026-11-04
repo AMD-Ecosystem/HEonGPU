@@ -284,7 +284,8 @@ HEonGPU now includes support for **Multiparty Computation (MPC)** protocols, pro
 - [GCC](https://gcc.gnu.org/) with C++20 support (tested with GCC 11.4)
 - [GMP](https://gmplib.org/)
 - [NTL](https://libntl.org/)
-- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=12.8
+- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >=12.8 (NVIDIA GPUs)
+- [ROCm](https://rocm.docs.amd.com/) >=7.2 (AMD GPUs)
 - [OpenSSL](https://www.openssl.org/) >= 1.1.1
 - [ZLIB](https://zlib.net/)
 
@@ -335,6 +336,31 @@ When HEonGPU builds RMM from source, installing HEonGPU also installs this RMM (
 Available build types: `Debug`, `Release` (default), `RelWithDebInfo`, `MinSizeRel`. Override with `-D CMAKE_BUILD_TYPE=<type>`. These propagate to all bundled libraries (GPU-FFT, GPU-NTT, RNGonGPU).
 
 The default install prefix is `/usr/local`. To install somewhere else, for example without `sudo`, set it when configuring (`-D CMAKE_INSTALL_PREFIX=<dir>`) or when installing (`cmake --install build --prefix <dir>`), and pass the same directory to your project with `-D CMAKE_PREFIX_PATH=<dir>`. The installed package can be moved to another directory afterwards.
+
+#### AMD GPUs (ROCm)
+
+Build with `-D USE_HIP=ON` to target AMD GPUs through HIP. This selects the HIP language for the GPU sources and links hipRAND and rocThrust in place of cuRAND and Thrust; RMM is replaced by hipMM (https://github.com/AMD-Ecosystem/hipMM), the ROCm-DS port of RMM. hipMM keeps RMM's names and headers at the API level of RMM 25.x, which HEonGPU supports on AMD GPUs alongside RMM 26.08 on NVIDIA GPUs. The RMM options above then apply to hipMM, which has its own version numbers (4.0).
+
+<div align="center">
+
+| GPU Architecture | Target (CMAKE_HIP_ARCHITECTURES Value) |
+|:----------------:|:---------------------------------------:|
+| CDNA2  | gfx90a |
+| CDNA3  | gfx942 |
+| RDNA3  | gfx1100, gfx1101, gfx1102 |
+| RDNA4  | gfx1200, gfx1201 |
+
+</div>
+
+```bash
+$ cmake -S . -B build -D USE_HIP=ON -D CMAKE_HIP_ARCHITECTURES=gfx90a -D CMAKE_BUILD_TYPE=Release
+$ cmake --build ./build/
+$ sudo cmake --install build
+```
+
+`CMAKE_HIP_ARCHITECTURES` is auto-detected from the GPU in the build machine; set it explicitly to cross-compile for another card.
+
+On an AMD GPU that shares its memory with the system, such as an APU, the default device memory pool takes 50% of the memory the runtime reports as available, and on such a part that is half of the whole machine rather than of a dedicated card. Choose a smaller initial device pool at runtime, sized for what the application needs, as shown under Memory Pool Configuration (Runtime) below. Discrete cards keep the default, where reserving half of the dedicated VRAM is cheap.
 
 ### Uninstall
 
