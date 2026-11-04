@@ -22,6 +22,11 @@
 #define cudaStreamCreate            hipStreamCreate
 #define cudaStreamDestroy           hipStreamDestroy
 #define cudaStreamSynchronize       hipStreamSynchronize
+#define cudaStreamCreateWithFlags   hipStreamCreateWithFlags
+#define cudaStreamNonBlocking       hipStreamNonBlocking
+#define cudaStreamPerThread         hipStreamPerThread
+#define cudaStreamWaitEvent         hipStreamWaitEvent
+#define cudaLaunchHostFunc          hipLaunchHostFunc
 
 #define cudaEvent_t                 hipEvent_t
 #define cudaEventCreate             hipEventCreate
@@ -29,6 +34,8 @@
 #define cudaEventSynchronize        hipEventSynchronize
 #define cudaEventDestroy            hipEventDestroy
 #define cudaEventElapsedTime        hipEventElapsedTime
+#define cudaEventCreateWithFlags    hipEventCreateWithFlags
+#define cudaEventDisableTiming      hipEventDisableTiming
 
 #define cudaError_t                 hipError_t
 #define cudaSuccess                 hipSuccess
@@ -67,6 +74,15 @@
 // Async memory allocation
 #define cudaMallocAsync             hipMallocAsync
 #define cudaFreeAsync               hipFreeAsync
+#define cudaMallocFromPoolAsync     hipMallocFromPoolAsync
+#define cudaMemPool_t               hipMemPool_t
+#define cudaMemPoolProps            hipMemPoolProps
+#define cudaMemPoolCreate           hipMemPoolCreate
+#define cudaMemPoolDestroy          hipMemPoolDestroy
+#define cudaMemPoolSetAttribute     hipMemPoolSetAttribute
+#define cudaMemPoolAttrReleaseThreshold hipMemPoolAttrReleaseThreshold
+#define cudaMemAllocationTypePinned hipMemAllocationTypePinned
+#define cudaMemLocationTypeDevice   hipMemLocationTypeDevice
 
 // Memory info
 #define cudaMemGetInfo              hipMemGetInfo
@@ -78,6 +94,7 @@
 
 // Device limits
 #define cudaDeviceSetLimit          hipDeviceSetLimit
+#define cudaDeviceGetLimit          hipDeviceGetLimit
 #define cudaLimitStackSize          hipLimitStackSize
 
 #else
